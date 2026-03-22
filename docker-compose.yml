@@ -22,3 +22,12 @@ services:
       - ./frontend:/app
       - /app/node_modules
     command: npm run dev -- --host 0.0.0.0
+
+  stylometry-ml-service:
+    build:
+      context: ./stylometry-ml-service
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./stylometry-ml-service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload

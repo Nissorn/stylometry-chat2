@@ -25,6 +25,10 @@
   let chatInput = "";
   let ws = null;
   let chatContainer;
+  
+  // Trust State
+  let trustScore = 100.0;
+  let showDebug = false;
 
   const API_BASE = "http://localhost:8000";
 
@@ -49,15 +53,50 @@
     ws = new WebSocket(wsUrl);
 
     ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-      messages = [...messages, msg];
-      scrollToBottom();
+      const data = JSON.parse(event.data);
+      if (data.type === "chat") {
+        messages = [...messages, {sender: data.sender, text: data.text}];
+        scrollToBottom();
+      } else if (data.type === "trust_update") {
+        trustScore = data.trust_score;
+      } else if (data.sender && data.text) { // fallback
+        messages = [...messages, {sender: data.sender, text: data.text}];
+        scrollToBottom();
+      }
     };
 
-    ws.onclose = () => {
-      console.log("WebSocket Disconnected");
+    ws.onclose = (event) => {
+      console.log("WebSocket Disconnected", event.code);
       ws = null;
+      if (event.code === 4001) {
+        forceLockout();
+      }
     };
+  }
+
+  function forceLockout() {
+    localStorage.removeItem("token");
+    localStorage.removeItem("username");
+    localStorage.removeItem("isTotpEnabled");
+    isAuthenticated = false;
+    currentUser = "";
+    token = "";
+    isTotpEnabled = false;
+    isSettingUpTOTP = false;
+    qrCodeBase64 = "";
+    totpSecretText = "";
+    setupTotpCode = "";
+    messages = [];
+    trustScore = 100.0;
+    
+    if (ws) {
+      ws.close();
+      ws = null;
+    }
+    
+    isLogin = true;
+    errorMessage = "Session locked due to unusual typing behavior. Please re-authenticate.";
+    successMessage = "";
   }
   
   function sendChatMessage() {
@@ -104,6 +143,7 @@
     setupTotpCode = "";
     errorMessage = "";
     successMessage = "";
+    trustScore = 100.0;
     
     if (ws) {
       ws.close();
@@ -307,7 +347,18 @@
       <div class="flex-1">
         <a href="/" class="btn btn-ghost text-xl">Stylometry Chat</a>
       </div>
-      <div class="flex-none gap-2">
+      <div class="flex-none gap-2 flex items-center">
+        <!-- Debug Toggle -->
+        <label class="swap swap-flip mr-4 text-xs font-semibold cursor-pointer">
+          <input type="checkbox" bind:checked={showDebug} />
+          <div class="swap-on text-primary">Debug: ON</div>
+          <div class="swap-off opacity-40">Debug: OFF</div>
+        </label>
+        
+        {#if showDebug}
+          <div class="radial-progress text-sm mr-4 {trustScore > 80 ? 'text-success' : trustScore > 40 ? 'text-warning' : 'text-error'}" style="--value:{trustScore}; --size:3rem; --thickness: 4px;" role="progressbar">{Math.round(trustScore)}</div>
+        {/if}
+
         <span class="text-sm font-semibold mr-2">Welcome, {currentUser}</span>
         <button class="btn btn-outline btn-error btn-sm" on:click={logout}>
           Logout
