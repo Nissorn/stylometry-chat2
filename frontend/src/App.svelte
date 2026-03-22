@@ -29,6 +29,7 @@
   // Trust State
   let trustScore = 100.0;
   let showDebug = false;
+  let securityEnforcement = true;
 
   const API_BASE = "http://localhost:8000";
 
@@ -101,7 +102,12 @@
   
   function sendChatMessage() {
     if (ws && chatInput.trim() !== "") {
-      ws.send(chatInput.trim());
+      const payload = {
+        message: chatInput.trim(),
+        enforce_security: securityEnforcement
+      };
+      console.log("DEBUG: Sending payload:", payload);
+      ws.send(JSON.stringify(payload));
       chatInput = "";
     }
   }
@@ -348,6 +354,13 @@
         <a href="/" class="btn btn-ghost text-xl">Stylometry Chat</a>
       </div>
       <div class="flex-none gap-2 flex items-center">
+        <!-- Security Enforcement Toggle -->
+        <label class="swap swap-flip mr-4 text-xs font-semibold cursor-pointer">
+          <input type="checkbox" bind:checked={securityEnforcement} />
+          <div class="swap-on text-error">Security: ON</div>
+          <div class="swap-off opacity-40">Security: OFF</div>
+        </label>
+
         <!-- Debug Toggle -->
         <label class="swap swap-flip mr-4 text-xs font-semibold cursor-pointer">
           <input type="checkbox" bind:checked={showDebug} />
