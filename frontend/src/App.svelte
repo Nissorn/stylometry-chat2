@@ -272,7 +272,7 @@
         </div>
       {/if}
 
-      <form on:submit={handleSubmit}>
+      <form on:submit={handleSubmit} novalidate>
         <div class="form-control mb-4">
           <label class="label" for="username">
             <span class="label-text">Username</span>
@@ -317,8 +317,8 @@
               placeholder="123456" 
               class="input input-bordered w-full" 
               bind:value={totpCode}
-              pattern="\d{6}"
               maxlength="6"
+              inputmode="numeric"
             />
           </div>
         {:else}
@@ -455,8 +455,9 @@
                   placeholder="Enter 6-digit code" 
                   class="input input-sm input-bordered w-full mb-3 text-center tracking-widest text-lg" 
                   bind:value={setupTotpCode}
-                  pattern="\d{6}"
+                  pattern="[0-9]{6}"
                   maxlength="6"
+                  inputmode="numeric"
                 />
                 <button class="btn btn-success btn-sm w-full" on:click={verifyTOTP} disabled={setupTotpCode.length !== 6}>
                   Verify & Save
