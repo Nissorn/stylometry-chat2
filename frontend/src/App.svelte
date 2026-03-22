@@ -4,46 +4,122 @@
   let isLogin = true;
   let username = "";
   let password = "";
+  let totpCode = ""; // Optional 2FA for login
   let errorMessage = "";
+  let successMessage = "";
 
   // State
   let isAuthenticated = false;
   let currentUser = "";
   let token = "";
+  let isTotpEnabled = false;
+
+  // TOTP Dashboard State
+  let qrCodeBase64 = "";
+  let totpSecretText = "";
+  let setupTotpCode = "";
+  let isSettingUpTOTP = false;
+
+  // Real-time Chat State
+  let messages = [];
+  let chatInput = "";
+  let ws = null;
+  let chatContainer;
 
   const API_BASE = "http://localhost:8000";
 
   onMount(() => {
     const storedToken = localStorage.getItem("token");
     const storedUser = localStorage.getItem("username");
+    const storedTotp = localStorage.getItem("isTotpEnabled");
     if (storedToken && storedUser) {
       token = storedToken;
       currentUser = storedUser;
+      if (storedTotp === "true") isTotpEnabled = true;
       isAuthenticated = true;
     }
   });
+
+  $: if (isAuthenticated && !ws) {
+    connectWebSocket();
+  }
+
+  function connectWebSocket() {
+    const wsUrl = `ws://localhost:8000/ws/chat?token=${token}`;
+    ws = new WebSocket(wsUrl);
+
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      messages = [...messages, msg];
+      scrollToBottom();
+    };
+
+    ws.onclose = () => {
+      console.log("WebSocket Disconnected");
+      ws = null;
+    };
+  }
+  
+  function sendChatMessage() {
+    if (ws && chatInput.trim() !== "") {
+      ws.send(chatInput.trim());
+      chatInput = "";
+    }
+  }
+
+  function handleChatKeydown(event) {
+    if (event.key === 'Enter') {
+      sendChatMessage();
+    }
+  }
+
+  function scrollToBottom() {
+    setTimeout(() => {
+      if (chatContainer) {
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+      }
+    }, 50);
+  }
 
   function toggleMode() {
     isLogin = !isLogin;
     username = "";
     password = "";
+    totpCode = "";
     errorMessage = "";
+    successMessage = "";
   }
 
   function logout() {
     localStorage.removeItem("token");
     localStorage.removeItem("username");
+    localStorage.removeItem("isTotpEnabled");
     isAuthenticated = false;
     currentUser = "";
     token = "";
+    isTotpEnabled = false;
+    isSettingUpTOTP = false;
+    qrCodeBase64 = "";
+    totpSecretText = "";
+    setupTotpCode = "";
+    errorMessage = "";
+    successMessage = "";
+    
+    if (ws) {
+      ws.close();
+      ws = null;
+    }
+    messages = [];
   }
 
   async function handleSubmit(event) {
     event.preventDefault();
     errorMessage = "";
+    successMessage = "";
     
     const endpoint = isLogin ? "/auth/login" : "/auth/register";
     const payload = { username, password };
+    if (isLogin && totpCode) payload.totp_code = totpCode;
     
     try {
       const response = await fetch(`${API_BASE}${endpoint}`, {
@@ -64,12 +140,79 @@
       // Store on success
       token = data.access_token;
       currentUser = username;
+      isTotpEnabled = data.is_totp_enabled || false;
+      
       localStorage.setItem("token", token);
       localStorage.setItem("username", currentUser);
+      localStorage.setItem("isTotpEnabled", isTotpEnabled.toString());
       isAuthenticated = true;
       
     } catch (error) {
       errorMessage = "Network error. Please try again.";
+    }
+  }
+
+  async function generateTOTP() {
+    errorMessage = "";
+    successMessage = "";
+    isSettingUpTOTP = true;
+    
+    try {
+      const response = await fetch(`${API_BASE}/auth/totp/generate?username=${encodeURIComponent(currentUser)}`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token}`
+        }
+      });
+      const data = await response.json();
+      
+      if (response.ok) {
+        qrCodeBase64 = data.qr_code;
+        totpSecretText = data.secret;
+      } else {
+        errorMessage = data.detail || "Failed to generate 2FA";
+      }
+    } catch (error) {
+      errorMessage = "Network Error during 2FA generation";
+    }
+  }
+
+  async function verifyTOTP() {
+    errorMessage = "";
+    successMessage = "";
+    
+    try {
+      const response = await fetch(`${API_BASE}/auth/totp/verify?username=${encodeURIComponent(currentUser)}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({ totp_code: setupTotpCode })
+      });
+      
+      const data = await response.json();
+      
+      if (response.ok) {
+        successMessage = "2FA Enabled Successfully!";
+        isTotpEnabled = true;
+        localStorage.setItem("isTotpEnabled", "true");
+        
+        isSettingUpTOTP = false;
+        qrCodeBase64 = "";
+        totpSecretText = "";
+        setupTotpCode = "";
+        
+        // Optionally update token if a new one was issued
+        if (data.access_token) {
+          token = data.access_token;
+          localStorage.setItem("token", token);
+        }
+      } else {
+        errorMessage = data.detail || "Invalid 2FA Code";
+      }
+    } catch (error) {
+      errorMessage = "Network Error verifying 2FA";
     }
   }
 </script>
@@ -107,7 +250,7 @@
           />
         </div>
         
-        <div class="form-control mb-6">
+        <div class="form-control mb-4">
           <label class="label" for="password">
             <span class="label-text">Password</span>
           </label>
@@ -121,6 +264,26 @@
             minlength="6"
           />
         </div>
+
+        <!-- Optional 2FA code field only shown in Login Mode -->
+        {#if isLogin}
+          <div class="form-control mb-6">
+            <label class="label" for="totpCode">
+              <span class="label-text">2FA Code (if enabled)</span>
+            </label>
+            <input 
+              type="text" 
+              id="totpCode"
+              placeholder="123456" 
+              class="input input-bordered w-full" 
+              bind:value={totpCode}
+              pattern="\d{6}"
+              maxlength="6"
+            />
+          </div>
+        {:else}
+          <div class="mb-6"></div>
+        {/if}
         
         <div class="form-control mt-2">
           <button type="submit" class="btn btn-primary w-full">
@@ -140,7 +303,7 @@
   </div>
   {:else}
   <div class="w-full h-screen flex flex-col bg-base-200">
-    <div class="navbar bg-base-100 shadow-sm px-4">
+    <div class="navbar bg-base-100 shadow-sm px-4 shrink-0">
       <div class="flex-1">
         <a href="/" class="btn btn-ghost text-xl">Stylometry Chat</a>
       </div>
@@ -152,12 +315,107 @@
       </div>
     </div>
     
-    <div class="flex-1 flex items-center justify-center p-4">
-      <div class="card w-full max-w-lg bg-base-100 shadow-xl">
-        <div class="card-body items-center text-center">
-          <h2 class="card-title text-3xl mb-4">Welcome to Thai Stylometry Chat!</h2>
-          <p class="mb-4">You are securely logged in as <strong>{currentUser}</strong>.</p>
-          <p class="text-sm text-base-content/70">The real-time chat interface will be built here shortly.</p>
+    <div class="flex-1 flex flex-col lg:flex-row gap-6 p-6 overflow-hidden">
+      <!-- Main Dashboard Chat Interface -->
+      <div class="flex-1 flex flex-col bg-base-100 shadow-xl rounded-box overflow-hidden h-full">
+        <div class="bg-base-200 p-4 font-bold border-b border-base-300">
+          Tester Bot Chamber
+        </div>
+        
+        <div class="flex-1 p-4 overflow-y-auto" bind:this={chatContainer}>
+          {#if messages.length === 0}
+            <div class="text-center text-base-content/50 mt-10">
+              <p>Welcome to Thai Stylometry Chat!</p>
+              <p class="text-sm">Say hello to the Tester Bot...</p>
+            </div>
+          {/if}
+          
+          {#each messages as msg}
+            <div class="chat {msg.sender === 'me' ? 'chat-end' : 'chat-start'}">
+              <div class="chat-header text-xs opacity-50 mb-1">
+                {msg.sender === 'me' ? currentUser : 'Tester Bot'}
+              </div>
+              <div class="chat-bubble {msg.sender === 'me' ? 'chat-bubble-primary' : 'chat-bubble-secondary'}">
+                {msg.text}
+              </div>
+            </div>
+          {/each}
+        </div>
+        
+        <div class="p-4 bg-base-200 border-t border-base-300 flex gap-2">
+          <input 
+            type="text" 
+            class="input input-bordered flex-1" 
+            placeholder="Type a message..." 
+            bind:value={chatInput}
+            on:keydown={handleChatKeydown}
+          />
+          <button class="btn btn-primary" on:click={sendChatMessage}>Send</button>
+        </div>
+      </div>
+      
+      <!-- Security Settings Panel -->
+      <div class="card w-full lg:w-96 bg-base-100 shadow-xl h-fit shrink-0">
+        <div class="card-body">
+          <h2 class="card-title text-xl border-b pb-2 mb-4">Security Settings</h2>
+          
+          {#if successMessage}
+            <div class="alert alert-success text-sm mb-4">
+              <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+              <span>{successMessage}</span>
+            </div>
+          {/if}
+
+          {#if errorMessage}
+            <div class="alert alert-error text-sm mb-4">
+              <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+              <span>{errorMessage}</span>
+            </div>
+          {/if}
+
+          {#if isTotpEnabled}
+             <div class="alert alert-success text-sm mb-4">
+              <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+              <span>✅ 2FA is securely enabled for your account.</span>
+            </div>
+          {:else if !isSettingUpTOTP}
+            <p class="text-sm text-base-content/80 mb-4">Protect your account with Two-Factor Authentication (2FA).</p>
+            <button class="btn btn-outline btn-primary w-full" on:click={generateTOTP}>
+              Enable 2FA
+            </button>
+          {:else}
+            <div class="flex flex-col items-center">
+              <p class="text-sm font-semibold mb-2">1. Scan QR Code</p>
+              {#if qrCodeBase64}
+                <div class="bg-white p-2 rounded-lg mb-2">
+                  <img src="data:image/png;base64,{qrCodeBase64}" alt="TOTP QR Code" class="w-48 h-48" />
+                </div>
+              {:else}
+                <span class="loading loading-spinner text-primary my-4"></span>
+              {/if}
+              <p class="text-xs text-base-content/60 mb-4">Secret: {totpSecretText}</p>
+              
+              <div class="w-full divider my-2"></div>
+              
+              <p class="text-sm font-semibold mb-2 w-full text-left">2. Verify & Save</p>
+              <div class="form-control w-full">
+                <input 
+                  type="text" 
+                  placeholder="Enter 6-digit code" 
+                  class="input input-sm input-bordered w-full mb-3 text-center tracking-widest text-lg" 
+                  bind:value={setupTotpCode}
+                  pattern="\d{6}"
+                  maxlength="6"
+                />
+                <button class="btn btn-success btn-sm w-full" on:click={verifyTOTP} disabled={setupTotpCode.length !== 6}>
+                  Verify & Save
+                </button>
+                <button class="btn btn-ghost btn-sm w-full mt-2" on:click={() => {isSettingUpTOTP = false; qrCodeBase64 = "";}}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          {/if}
         </div>
       </div>
     </div>

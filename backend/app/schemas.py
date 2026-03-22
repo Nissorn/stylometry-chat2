@@ -9,10 +9,12 @@ class UserCreate(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str
+    is_totp_enabled: bool = False
 
 class LoginRequest(BaseModel):
     username: str
     password: str
+    totp_code: str | None = None
 
 class TOTPVerifyRequest(BaseModel):
-    code: str = Field(..., pattern=r"^\d{6}$")
+    totp_code: str = Field(..., pattern=r"^\d{6}$")
