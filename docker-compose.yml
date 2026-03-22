@@ -30,4 +30,5 @@ services:
       - "8001:8001"
     volumes:
       - ./stylometry-ml-service:/app
+      - /Users/onis2/Project/StylometryAI:/ml_workspace
     command: uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload

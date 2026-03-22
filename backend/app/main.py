@@ -34,6 +34,7 @@ ML_SERVICE_URL = "http://stylometry-ml-service:8001/predict"
 async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Session = Depends(get_db)):
     await websocket.accept()
     if not token:
+        print("DEBUG: Connection closed due to missing token")
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
         
@@ -41,14 +42,17 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
         payload = jwt.decode(token, auth.SECRET_KEY, algorithms=[auth.ALGORITHM])
         username: str = payload.get("sub")
         if username is None:
+            print("DEBUG: Connection closed - JWT missing sub")
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
-    except JWTError:
+    except Exception as e:
+        print(f"DEBUG: Connection closed - JWT Error: {e}")
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
         
     user = db.query(models.User).filter(models.User.username == username).first()
     if not user:
+        print(f"DEBUG: Connection closed - User {username} not found in DB")
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
@@ -59,50 +63,76 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
     try:
         async with httpx.AsyncClient() as client:
             while True:
-                data = await websocket.receive_text()
-                
-                # Echo logic
-                await websocket.send_json({"type": "chat", "sender": "me", "text": data})
-                await websocket.send_json({"type": "chat", "sender": "bot", "text": f"Echo: {data}"})
-                
-                # Stylometry buffering
-                if len(data.strip()) > 0:
-                    msg_buffer.append(data.strip())
-                
-                # Check buffer sliding window
-                if len(msg_buffer) == 5:
-                    try:
-                        ml_payload = {
-                            "username": username,
-                            "messages": list(msg_buffer)
-                        }
-                        response = await client.post(ML_SERVICE_URL, json=ml_payload, timeout=5.0)
-                        if response.status_code == 200:
-                            ml_data = response.json()
-                            confidence = ml_data.get("confidence_score", 1.0)
-                            
-                            # Reward Logic
-                            if confidence > 0.8:
-                                trust_score = min(100.0, trust_score + 5.0)
-                            # Penalty Logic
-                            elif confidence < 0.5:
-                                penalty = (0.5 - confidence) * 100.0
-                                trust_score = max(0.0, trust_score - penalty)
+                try:
+                    data = await websocket.receive_text()
+                    
+                    # Echo logic
+                    await websocket.send_json({"type": "chat", "sender": "me", "text": data})
+                    await websocket.send_json({"type": "chat", "sender": "bot", "text": f"Echo: {data}"})
+                    
+                    # Stylometry buffering
+                    if len(data.strip()) > 0:
+                        msg_buffer.append(data.strip())
+                    
+                    # Check buffer sliding window
+                    if len(msg_buffer) == 5:
+                        try:
+                            ml_payload = {
+                                "username": username,
+                                "messages": list(msg_buffer)
+                            }
+                            response = await client.post(ML_SERVICE_URL, json=ml_payload, timeout=5.0)
+                            if response.status_code == 200:
+                                ml_data = response.json()
+                                confidence = float(ml_data.get("confidence_score", 1.0))
+                                status_msg = ml_data.get("status", "active")
+                                print(f"DEBUG: Received from ML Service -> Status: {status_msg}, Score: {confidence}")
                                 
-                            # Send trust update to UI
-                            await websocket.send_json({
-                                "type": "trust_update",
-                                "trust_score": round(trust_score, 2),
-                                "confidence": round(confidence, 4)
-                            })
-                            
-                            # Session Freeze Check
-                            if trust_score < 40.0:
-                                await websocket.close(code=4001, reason="Session locked due to unusual typing behavior")
-                                break
-                    except httpx.RequestError as e:
-                        # Log ml service failure without crashing chat
-                        print(f"ML Service error: {e}")
+                                if status_msg == "cold_start":
+                                    await websocket.send_json({
+                                        "type": "trust_update",
+                                        "trust_score": float(round(trust_score, 2)),
+                                        "confidence": float(round(confidence, 4)),
+                                        "status": "cold_start",
+                                        "message": "Collecting baseline data..."
+                                    })
+                                else:
+                                    # ACTIVE STATUS - Apply trust score mathematics
+                                    # Reward Logic
+                                    if confidence > 0.8:
+                                        change_val = 5.0
+                                        trust_score = min(100.0, trust_score + change_val)
+                                        print(f"DEBUG: Current Trust Score: {trust_score}, Change: +{change_val} (Reward)")
+                                    # Penalty Logic
+                                    elif confidence < 0.5:
+                                        change_val = float((0.5 - confidence) * 100.0)
+                                        trust_score = max(0.0, trust_score - change_val)
+                                        print(f"DEBUG: Current Trust Score: {trust_score}, Change: -{change_val} (Penalty)")
+                                    else:
+                                        print(f"DEBUG: Current Trust Score: {trust_score}, Change: 0.0 (Neutral)")
+                                        
+                                    # Send trust update to UI
+                                    await websocket.send_json({
+                                        "type": "trust_update",
+                                        "trust_score": float(round(trust_score, 2)),
+                                        "confidence": float(round(confidence, 4)),
+                                        "status": "active"
+                                    })
+                                    
+                                    # Session Freeze Check
+                                    if trust_score < 40.0:
+                                        await websocket.close(code=4001, reason="Session locked due to unusual typing behavior")
+                                        break
+                        except httpx.RequestError as e:
+                            # Log ml service failure without crashing chat
+                            print(f"ML Service error: {e}")
+                except WebSocketDisconnect:
+                    raise
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    print(f"DEBUG: Exception in websocket inner loop: {e}")
+                    # keep alive
                         
     except WebSocketDisconnect:
         pass
