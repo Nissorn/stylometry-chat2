@@ -112,13 +112,35 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                 data_dir = "/ml_workspace/data"
                                 try:
                                     os.makedirs(data_dir, exist_ok=True)
-                                    with open(os.path.join(data_dir, f"{username}_baseline.txt"), "a", encoding="utf-8") as f:
+                                    baseline_path = os.path.join(data_dir, f"{username}_baseline.txt")
+                                    with open(baseline_path, "a", encoding="utf-8") as f:
                                         f.write(clean_text + "\n")
+                                        
+                                    # Auto-Retraining Trigger
+                                    with open(baseline_path, "r", encoding="utf-8") as f:
+                                        line_count = sum(1 for line in f if line.strip())
+                                        
+                                    if line_count == 20 or (line_count > 20 and line_count % 10 == 0):
+                                        print(f"DEBUG: Auto-Triggering /train for {username} at {line_count} lines")
+                                        asyncio.create_task(client.post(f"http://stylometry-ml-service:8001/train/{username}", timeout=30.0))
+                                        
                                 except Exception as e:
-                                    print(f"DEBUG: Failed to write baseline data: {e}")
+                                    print(f"DEBUG: Failed to write baseline data or trigger training: {e}")
                         
                         # Check buffer sliding window
                         if len(msg_buffer) == 5:
+                            if not enforce_security:
+                                # Bypass ML service completely
+                                trust_score = 100.0  # Reset/Maintain at 100
+                                await websocket.send_json({
+                                    "type": "trust_update",
+                                    "trust_score": 100.0,
+                                    "confidence": 1.0,
+                                    "status": "inactive",
+                                    "message": "Status: Monitoring Disabled (Data Collection Mode)"
+                                })
+                                continue
+                                
                             try:
                                 ml_payload = {
                                     "username": username,
@@ -141,6 +163,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                         })
                                     else:
                                         # ACTIVE STATUS - Apply trust score mathematics
+                                        # Count baseline dynamically for Grace Period
+                                        baseline_path = os.path.join("/ml_workspace/data", f"{username}_baseline.txt")
+                                        try:
+                                            with open(baseline_path, "r", encoding="utf-8") as f:
+                                                baseline_count = sum(1 for line in f if line.strip())
+                                        except FileNotFoundError:
+                                            baseline_count = 0
+                                            
                                         # Reward Logic
                                         if confidence > 0.85:
                                             change_val = 5.0
@@ -148,9 +178,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                             print(f"DEBUG: Current Trust Score: {trust_score}, Change: +{change_val} (Reward)")
                                         # Penalty Logic
                                         elif confidence < 0.7:
-                                            change_val = float((0.7 - confidence) * 150.0)
+                                            if baseline_count <= 20:
+                                                penalty_multiplier = 0.0
+                                            elif baseline_count <= 60:
+                                                penalty_multiplier = 15.0
+                                            elif baseline_count <= 120:
+                                                penalty_multiplier = 40.0
+                                            elif baseline_count <= 200:
+                                                penalty_multiplier = 80.0
+                                            else:
+                                                penalty_multiplier = 150.0
+                                                
+                                            change_val = float((0.7 - confidence) * penalty_multiplier)
                                             trust_score = max(0.0, trust_score - change_val)
-                                            print(f"DEBUG: Current Trust Score: {trust_score}, Change: -{change_val} (Penalty)")
+                                            print(f"DEBUG: Current Trust Score: {trust_score}, Change: -{change_val} (Penalty Multiplier: {penalty_multiplier})")
                                         else:
                                             print(f"DEBUG: Current Trust Score: {trust_score}, Change: 0.0 (Neutral)")
                                             

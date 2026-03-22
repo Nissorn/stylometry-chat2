@@ -361,6 +361,15 @@
           <div class="swap-off opacity-40">Security: OFF</div>
         </label>
 
+        <!-- Status Feedback -->
+        <div class="hidden md:block mr-4 text-[10px] uppercase tracking-tighter font-bold">
+          {#if securityEnforcement}
+            <span class="text-error animate-pulse">● Status: Active Protection</span>
+          {:else}
+            <span class="text-base-content opacity-40">○ Status: Monitoring Disabled (Data Collection Mode)</span>
+          {/if}
+        </div>
+
         <!-- Debug Toggle -->
         <label class="swap swap-flip mr-4 text-xs font-semibold cursor-pointer">
           <input type="checkbox" bind:checked={showDebug} />

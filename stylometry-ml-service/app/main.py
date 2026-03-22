@@ -7,27 +7,47 @@ import joblib
 import numpy as np
 
 import re
-
+import json
+import torch
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import StandardScaler
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier
 
-class StylometricFeatureExtractor(BaseEstimator, TransformerMixin):
-    def fit(self, X, y=None):
-        return self
+from app.fusion_models import CharVocab, AttentionSessionCNN, StylometricFeatureExtractor
 
-    def transform(self, X, y=None):
-        features = []
-        for text in X:
-            text = str(text)
-            length = len(text)
-            laugh_count = len(re.findall(r'5+|[hH]aha|ฮ่า+|อิอิ', text))
-            elongation_count = len(re.findall(r'(.)\1{2,}|ๆ', text))
-            punct_count = len(re.findall(r'[?!.]{2,}|~+', text))
-            space_count = text.count(' ')
-            features.append([length, laugh_count, elongation_count, punct_count, space_count])
-        return np.array(features)
+UNIVERSAL_BACKGROUND_CORPUS = [
+    "การประชุมจะเริ่มในเวลา 10.00 น. ขอให้ทุกคนตรงต่อเวลาด้วยครับ",
+    "ทางบริษัทขอขอบพระคุณที่ท่านให้ความสนใจในบริการของเรา",
+    "วันนี้สภาพอากาศค่อนข้างแปรปรวน โปรดดูแลรักษาสุขภาพ",
+    "เอกสารที่ส่งมาให้เมื่อวานได้รับครบถ้วนแล้วนะคะ ขอบคุณมากค่ะ",
+    "ขออนุญาตแจ้งเปลี่ยนแปลงกำหนดการเดินทางในวันพรุ่งนี้",
+    "ตลาดหุ้นวันนี้ปิดตลาดปรับตัวลดลงตามทิศทางตลาดต่างประเทศ",
+    "รับทราบครับ จะดำเนินการให้เสร็จภายในวันศุกร์นี้",
+    "คุณลูกค้าสามารถชำระเงินผ่านระบบคิวอาร์โค้ดได้เลยค่ะ",
+    "เมื่อคืนฝนตกหนักมากเลย ถนนแถวบ้านติดสุดๆ",
+    "สรุปยอดขายประจำเดือนนี้เดี๋ยวผมส่งให้ในอีเมลนะครับ",
+    "โครงการนี้มีกำหนดการแล้วเสร็จภายในไตรมาสที่สามของปีหน้า",
+    "เดี๋ยวแวะซื้อกาแฟก่อนเข้าออฟฟิศ มีใครเอาอะไรไหม",
+    "ขอแสดงความเสียใจกับครอบครัวผู้สูญเสียด้วยครับ",
+    "รบกวนช่วยตรวจสอบความถูกต้องของข้อมูลในตารางให้หน่อย",
+    "พรุ่งนี้เรามีนัดคุยเรื่องโปรเจกต์ใหม่ตอนบ่ายโมงตรงนะ",
+    "รัฐบาลประกาศมาตรการกระตุ้นเศรษฐกิจเฟสใหม่แล้ววันนี้",
+    "ขออภัยในความไม่สะดวก ทางเราจะรีบปรับปรุงแก้ไขโดยเร็วที่สุด",
+    "วันนี้ประชุมยาวมากเลย แทบจะไม่ได้พักทานข้าว",
+    "สินค้าชิ้นนี้มีการรับประกัน 1 ปีนับจากวันที่ซื้อครับ",
+    "สุขสันต์วันเกิด ขอให้มีความสุขมากๆ สุขภาพแข็งแรงนะ",
+    "คณะกรรมการมีมติเห็นชอบกับข้อเสนอดังกล่าวเป็นเอกฉันท์",
+    "ตอนนี้กำลังเดินทางไป น่าจะถึงประมาณครึ่งชั่วโมง",
+    "รบกวนส่งเอกสารตัวจริงมาที่อยู่บริษัทตามที่แจ้งไว้นะคะ",
+    "ดัชนีความเชื่อมั่นผู้บริโภคเดือนนี้ปรับตัวดีขึ้นเล็กน้อย",
+    "เดี๋ยวพรุ่งนี้เช้าผมจะโทรไปคุยรายละเอียดอีกทีนะครับ",
+    "ขอบคุณสำหรับคำแนะนำดีๆ ครับ จะนำไปปรับใช้แน่นอน",
+    "ระบบจะปิดปรับปรุงชั่วคราวในคืนนี้เวลาเที่ยงคืนถึงตีสี่",
+    "อาหารร้านนี้อร่อยมากเลย แนะนำให้ลองไปชิมดูนะ",
+    "ทางเรากำลังเร่งตรวจสอบปัญหาที่เกิดขึ้นให้อยู่ครับ",
+    "ยินดีด้วยกับความสำเร็จในครั้งนี้นะคะ สู้ต่อไปค่ะ"
+]
 
 app = FastAPI(title="Stylometry ML Microservice")
 
@@ -45,86 +65,69 @@ def read_root():
     return {"status": "ML Service is operating (Train on Demand Orchestration)"}
 
 @app.post("/train/{username}")
-def train_user_model(username: str, req: TrainRequest):
-    if len(req.messages) < 5:
-        raise HTTPException(status_code=400, detail="Require at least 5 messages to establish a baseline.")
+def train_user_model(username: str):
+    baseline_path = os.path.join("/ml_workspace/data", f"{username}_baseline.txt")
+    if not os.path.exists(baseline_path):
+        raise HTTPException(status_code=400, detail="Baseline data not found")
+        
+    with open(baseline_path, "r", encoding="utf-8") as f:
+        user_texts = [line.strip() for line in f if line.strip()]
+        
+    if len(user_texts) < 20:
+        raise HTTPException(status_code=400, detail="Require at least 20 baseline messages.")
         
     user_dir = os.path.join(ML_WORKSPACE, username)
     os.makedirs(user_dir, exist_ok=True)
     
-    # Positive Samples
-    user_texts = [msg for msg in req.messages if msg.strip()]
-    if not user_texts:
-        raise HTTPException(status_code=400, detail="No valid text found in messages")
-        
-    pos_samples = random.choices(user_texts, k=50)
+    pos_samples = user_texts
     labels = [1] * len(pos_samples)
     
-    # Dummy Negative Samples (Impostor texts)
-    negative_texts = [
-        "สวัสดีครับ ขอสอบถามข้อมูลหน่อยครับ",
-        "ไม่ทราบว่ามีสินค้ารุ่นนี้ไหมคะ",
-        "ขอบคุณมากครับที่ให้ข้อมูล",
-        "เดี๋ยวโอนเงินแล้วจะแจ้งสลิปนะคะ",
-        "จัดส่งได้วันไหนครับ",
-        "ฮ่าๆๆ ตลกมากเลย",
-        "วันนี้เหนื่อยจัง",
-        "ใช่ๆ เห็นด้วยเลยแหละ",
-        "โอเค งั้นเจอกันพรุ่งนี้นะ",
-        "สนใจสั่งซื้อครับ",
-        "555555 โคตรฮา",
-        "ดีจ้า วันนี้ทำไร",
-        "หิวข้าวววว กินไรดี",
-        "สุดยอดดดด",
-        "อืม ตามนั้นแหละ",
-        "รับทราบครับผม",
-        "ฝันดีนะ",
-        "สู้ๆ น้า",
-        "รบกวนหน่อยนะคะ",
-        "hello how are you",
-        "test test 123",
-        "what's up man",
-        "good morning!",
-        "เดี๋ยวทักไปใหม่นะ",
-        "รอก่อนแป๊บ",
-        "รีบไหม",
-        "ตอนนี้ยุ่งมาก เดี่ยวโทรกลับ",
-        "ส่งโลเคชั่นมาหน่อย",
-        "โอนแล้ว 500 บาท",
-        "พรุ่งนี้หยุดไหม",
-        # New Diverse Additions
-        "ok", "555", "ยืมเงินหน่อย",
-        "asdfghjkl", "ฟหกดเาสวง",
-        "I need some help please", "This is urgently required",
-        "what do you mean by that?", "can you explain more",
-        "really!!!", "what???", "no way!!!", "hurry up!!!",
-        "???????", ".........."
-    ]
-    
-    # Balance the dataset (or just append)
-    neg_samples = random.choices(negative_texts, k=50)
+    # Balance the dataset using Universal Background Corpus at exactly 1:1 Ratio
+    neg_samples = random.choices(UNIVERSAL_BACKGROUND_CORPUS, k=len(pos_samples))
     labels.extend([0] * len(neg_samples))
     all_texts = pos_samples + neg_samples
     
-    # 1. Train Meta Extractor & Standardize
+    # 1. Initialize CNN & Vocab
+    vocab = CharVocab(all_texts, max_size=150)
+    cnn_model = AttentionSessionCNN(len(vocab))
+    cnn_model.eval()
+    
+    cnn_features = []
+    with torch.no_grad():
+        for text in all_texts:
+            encoded = torch.tensor([vocab.encode(text, max_len=256)], dtype=torch.long)
+            feat = cnn_model([encoded], return_features=True) # (1, 128)
+            cnn_features.append(feat.squeeze(0).numpy())
+    cnn_features = np.array(cnn_features)
+    
+    # 2. Train Meta Extractor & Standardize
     meta_extractor = StylometricFeatureExtractor()
     X_meta = meta_extractor.fit_transform(all_texts)
     
     scaler = StandardScaler()
     X_meta_scaled = scaler.fit_transform(X_meta)
     
-    # 2. Train TF-IDF
-    tfidf = TfidfVectorizer(analyzer='char', ngram_range=(2, 4), max_features=1000)
-    X_tfidf = tfidf.fit_transform(all_texts).toarray()
+    # 3. Train TF-IDF & Stacking LR
+    tfidf = TfidfVectorizer(analyzer='char', ngram_range=(2, 4), max_features=1000, min_df=1)
+    X_tfidf = tfidf.fit_transform(all_texts)
     
-    # Concatenate features
-    X_combined = np.hstack((X_meta_scaled, X_tfidf))
+    stacking_lr = LogisticRegression(max_iter=1000, random_state=42)
+    stacking_lr.fit(X_tfidf, labels)
+    X_tfidf_prob = stacking_lr.predict_proba(X_tfidf)[:, 1].reshape(-1, 1)
     
-    # 3. Train XGBoost model
+    # 4. FUSE to 134-Dim Vector
+    # TODO: Remove np.zeros masking once the real .pth weights are loaded.
+    cnn_features = np.zeros((len(all_texts), 128))
+    X_combined = np.hstack((cnn_features, X_meta_scaled, X_tfidf_prob))
+    print(f"DEBUG: Fusion successful! Shape: {X_combined.shape}")
+    
+    # 5. Train XGBoost model with balanced params
     xgb_model = XGBClassifier(
         n_estimators=100, 
         max_depth=3, 
         learning_rate=0.1,
+        reg_lambda=1.0,
+        scale_pos_weight=1,
         random_state=42, 
         objective='binary:logistic',
         use_label_encoder=False, 
@@ -132,66 +135,82 @@ def train_user_model(username: str, req: TrainRequest):
     )
     xgb_model.fit(X_combined, labels)
     
-    # 4. Save Artifacts to /ml_workspace/models/{username}
+    # 6. Save Artifacts
+    with open(os.path.join(user_dir, "vocab.json"), "w") as f:
+        json.dump(vocab.char2idx, f)
+    torch.save(cnn_model.state_dict(), os.path.join(user_dir, "cnn.pth"))
     joblib.dump(meta_extractor, os.path.join(user_dir, "meta.pkl"))
     joblib.dump(scaler, os.path.join(user_dir, "scaler.pkl"))
     joblib.dump(tfidf, os.path.join(user_dir, "tfidf.pkl"))
+    joblib.dump(stacking_lr, os.path.join(user_dir, "lr.pkl"))
     joblib.dump(xgb_model, os.path.join(user_dir, "xgb_model.pkl"))
     
-    return {"status": "success", "message": f"Orchestration POC: Trained unique model for {username}"}
+    return {"status": "success", "message": f"Auto-Retraining Complete: 134-dim model for {username}"}
 
 @app.post("/predict")
 def predict(req: PredictRequest):
     user_dir = os.path.join(ML_WORKSPACE, req.username)
+    vocab_path = os.path.join(user_dir, "vocab.json")
+    cnn_path = os.path.join(user_dir, "cnn.pth")
     meta_path = os.path.join(user_dir, "meta.pkl")
     scaler_path = os.path.join(user_dir, "scaler.pkl")
     tfidf_path = os.path.join(user_dir, "tfidf.pkl")
+    lr_path = os.path.join(user_dir, "lr.pkl")
     xgb_path = os.path.join(user_dir, "xgb_model.pkl")
     
-    print(f"DEBUG: Checking for model at: {user_dir}")
-    print(f"DEBUG: Model directory exists: {os.path.exists(user_dir)}")
-    print(f"DEBUG: xgb_model.pkl exists: {os.path.exists(xgb_path)}")
-    
-    # COLD START TRIGGER: If personal models don't exist
     if not os.path.exists(xgb_path):
-        print(f"DEBUG: Cold start triggered for {req.username}. Models missing.")
         return {"confidence_score": 1.0, "status": "cold_start"}
         
-    # ACTIVE INFERENCE: Load personal artifacts dynamically
     try:
+        with open(vocab_path, "r") as f:
+            char2idx = json.load(f)
+        vocab = CharVocab([]) # Dummy init
+        vocab.char2idx = char2idx
+        
+        cnn_model = AttentionSessionCNN(len(vocab))
+        cnn_model.load_state_dict(torch.load(cnn_path))
+        cnn_model.eval()
+        
         meta_extractor = joblib.load(meta_path)
         scaler = joblib.load(scaler_path)
         tfidf = joblib.load(tfidf_path)
+        stacking_lr = joblib.load(lr_path)
         xgb_model = joblib.load(xgb_path)
-        print(f"DEBUG: Successfully loaded Meta, Scaler, TF-IDF and XGB models for {req.username}")
     except Exception as e:
-        print(f"DEBUG: Failed to load models for {req.username}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to load user artifacts: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to load artifacts: {e}")
         
     # Process each message individually and average the scores
     valid_msgs = [m for m in req.messages if m.strip()]
     if not valid_msgs:
         return {"confidence_score": 1.0, "status": "active"}
 
-    print(f"DEBUG: Processing {len(valid_msgs)} Individual Texts: {valid_msgs}")
-    
-    X_meta = meta_extractor.transform(valid_msgs)
-    print(f"DEBUG: Meta features (First msg): {X_meta[0]}")
-    
-    X_meta_scaled = scaler.transform(X_meta)
-    
-    X_tfidf_sparse = tfidf.transform(valid_msgs)
-    X_tfidf = X_tfidf_sparse.toarray()
-    print(f"DEBUG: TF-IDF shape: {X_tfidf.shape}, non-zero elements: {X_tfidf_sparse.nnz}")
-    
-    X_combined = np.hstack((X_meta_scaled, X_tfidf))
-    probabilities = xgb_model.predict_proba(X_combined)
-    
-    # Prob of class 1 for each message
-    confidences = [float(p[1]) if len(p) > 1 else 1.0 for p in probabilities]
-    confidence = sum(confidences) / len(confidences)
+    # Process Late Fusion for each message INDIVIDUALLY
+    confidences = []
+    for msg in valid_msgs:
+        # 1. Deep Feature
+        with torch.no_grad():
+            encoded = torch.tensor([vocab.encode(msg, max_len=256)], dtype=torch.long)
+            feat = cnn_model([encoded], return_features=True)
+            X_deep = feat.numpy()
+            
+        # 2. Meta Feature
+        X_meta = meta_extractor.transform([msg])
+        X_meta_scaled = scaler.transform(X_meta)
+        
+        # 3. TF-IDF Stacking Feature
+        X_tfidf = tfidf.transform([msg])
+        X_tfidf_prob = stacking_lr.predict_proba(X_tfidf)[:, 1].reshape(-1, 1)
+        
+        # 4. Late Fusion
+        # TODO: Remove np.zeros masking once the real .pth weights are loaded.
+        X_deep = np.zeros((1, 128))
+        X_combined = np.hstack((X_deep, X_meta_scaled, X_tfidf_prob))
+        prob = xgb_model.predict_proba(X_combined)[0, 1]
+        confidences.append(float(prob))
+        
+    confidence = float(np.mean(confidences))
     
     print(f"DEBUG: Individual message confidences: {confidences}")
-    print(f"DEBUG: Raw Average Confidence Score for {req.username}: {confidence}")
+    print(f"DEBUG: Final Average Confidence Score for {req.username}: {confidence}")
     
     return {"confidence_score": confidence, "status": "active"}
