@@ -1,0 +1,14 @@
+# General Guidelines
+- Maintain decoupled architecture (Backend/Frontend).
+- Clean, modular code.
+
+# Backend (FastAPI)
+- Best practices for FastAPI + SQLite.
+- Pydantic V2 strictly: use `pattern=r"..."` (not regex), and use `model_config = ConfigDict(...)` (not class Config).
+- Keep dependencies updated but adhere to fixed requirements when dictated.
+
+# Frontend (Svelte + Tailwind V4 + DaisyUI)
+- Strictly use Tailwind V4 syntax.
+- `app.css` should only use `@import "tailwindcss";` and `@plugin "daisyui";`.
+- Use the `@tailwindcss/vite` plugin in `vite.config.js`. DO NOT use old Tailwind V3 syntax.
+- Center main app elements with Flexbox/Grid centering (`min-h-screen flex items-center justify-center bg-base-200`).

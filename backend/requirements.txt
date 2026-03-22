@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+sqlalchemy
+pyotp
+qrcode
+passlib[bcrypt]
+bcrypt==3.2.0
+python-jose
+pydantic[email]
