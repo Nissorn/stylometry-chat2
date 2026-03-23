@@ -53,6 +53,31 @@ app = FastAPI(title="Stylometry ML Microservice")
 
 ML_WORKSPACE = "/ml_workspace/models"
 
+# ---------------------------------------------------------------------------
+# Load Pre-trained Base CNN (trained offline by scripts/train_cnn_offline.py)
+# ---------------------------------------------------------------------------
+BASE_CNN_MODEL = None
+BASE_VOCAB = None
+
+_BASE_WEIGHTS = "/app/base_char_cnn.pth"
+_BASE_VOCAB   = "/app/base_char_cnn_vocab.json"
+
+if os.path.exists(_BASE_WEIGHTS) and os.path.exists(_BASE_VOCAB):
+    try:
+        with open(_BASE_VOCAB, "r", encoding="utf-8") as _f:
+            _char2idx = json.load(_f)
+        BASE_VOCAB = CharVocab([])
+        BASE_VOCAB.char2idx = _char2idx
+        BASE_CNN_MODEL = AttentionSessionCNN(len(BASE_VOCAB))
+        BASE_CNN_MODEL.load_state_dict(torch.load(_BASE_WEIGHTS, map_location="cpu"))
+        BASE_CNN_MODEL.eval()
+        print(f"[INFO] Pre-trained base CharCNN loaded — vocab size {len(BASE_VOCAB)}")
+    except Exception as _e:
+        print(f"[WARN] Could not load base CharCNN: {_e}. CNN branch will use zeros.")
+else:
+    print("[WARN] base_char_cnn.pth not found. Run scripts/train_cnn_offline.py first. CNN branch masked to zeros.")
+
+
 class PredictRequest(BaseModel):
     username: str
     messages: List[str]
@@ -116,8 +141,20 @@ def train_user_model(username: str):
     X_tfidf_prob = stacking_lr.predict_proba(X_tfidf)[:, 1].reshape(-1, 1)
     
     # 4. FUSE to 134-Dim Vector
-    # TODO: Remove np.zeros masking once the real .pth weights are loaded.
-    cnn_features = np.zeros((len(all_texts), 128))
+    if BASE_CNN_MODEL is not None:
+        # Use pre-trained base CNN as a feature extractor (frozen)
+        base_cnn_feats = []
+        with torch.no_grad():
+            for text in all_texts:
+                encoded = torch.tensor([BASE_VOCAB.encode(text, max_len=256)], dtype=torch.long)
+                feat = BASE_CNN_MODEL([encoded], return_features=True)
+                base_cnn_feats.append(feat.squeeze(0).numpy())
+        cnn_features = np.array(base_cnn_feats)
+        print(f"DEBUG: Real base-CNN features shape: {cnn_features.shape}")
+    else:
+        # Fallback: zeros until train_cnn_offline.py has been run
+        cnn_features = np.zeros((len(all_texts), 128))
+        print("DEBUG: CNN masked to zeros (base_char_cnn.pth not available)")
     X_combined = np.hstack((cnn_features, X_meta_scaled, X_tfidf_prob))
     print(f"DEBUG: Fusion successful! Shape: {X_combined.shape}")
     
@@ -202,8 +239,6 @@ def predict(req: PredictRequest):
         X_tfidf_prob = stacking_lr.predict_proba(X_tfidf)[:, 1].reshape(-1, 1)
         
         # 4. Late Fusion
-        # TODO: Remove np.zeros masking once the real .pth weights are loaded.
-        X_deep = np.zeros((1, 128))
         X_combined = np.hstack((X_deep, X_meta_scaled, X_tfidf_prob))
         prob = xgb_model.predict_proba(X_combined)[0, 1]
         confidences.append(float(prob))
