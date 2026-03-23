@@ -92,6 +92,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
         except FileNotFoundError:
             _seed_msgs = []
         msg_buffer = deque(_seed_msgs, maxlen=5)
+        score_buffer = deque(maxlen=5)  # Tracks raw per-message confidence scores for strike counting
         print(f"DEBUG: Session started for {username} — buffer pre-filled with {len(_seed_msgs)} baseline messages")
 
         try:
@@ -175,7 +176,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                             "message": "Collecting baseline data..."
                                         })
                                     else:
-                                        # ACTIVE STATUS - Apply trust score mathematics
+                                        # ACTIVE STATUS — 3-Zone Gray Zone Trust Logic
                                         # Count baseline dynamically for Grace Period
                                         baseline_path = os.path.join("/ml_workspace/data", f"{username}_baseline.txt")
                                         try:
@@ -183,30 +184,27 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                                 baseline_count = sum(1 for line in f if line.strip())
                                         except FileNotFoundError:
                                             baseline_count = 0
-                                        # Reward Logic: only reward truly high confidence
-                                        if confidence >= 0.90:
-                                            change_val = 5.0
-                                            trust_score = min(100.0, trust_score + change_val)
-                                            print(f"DEBUG: Current Trust Score: {trust_score}, Change: +{change_val} (Reward)")
-                                        # Penalty Logic: penalise anything below 0.75
-                                        elif confidence < 0.75:
-                                            if baseline_count <= 20:
-                                                penalty_multiplier = 0.0
-                                            elif baseline_count <= 60:
-                                                penalty_multiplier = 10.0
-                                            elif baseline_count <= 120:
-                                                penalty_multiplier = 30.0
-                                            elif baseline_count <= 200:
-                                                penalty_multiplier = 80.0
+
+                                        score = latest_message_confidence
+
+                                        # RED ZONE — Clear anomaly, apply penalty
+                                        if score < 0.50:
+                                            if baseline_count < 100:
+                                                penalty = 10.0
                                             else:
-                                                penalty_multiplier = 150.0
-                                                
-                                            change_val = float((0.75 - confidence) * penalty_multiplier)
-                                            trust_score = max(0.0, trust_score - change_val)
-                                            print(f"DEBUG: Current Trust Score: {trust_score}, Change: -{change_val} (Penalty Multiplier: {penalty_multiplier})")
+                                                penalty = 25.0
+                                            trust_score = max(0.0, trust_score - penalty)
+                                            print(f"DEBUG: Red Zone — penalty -{penalty} | score={score:.3f} | trust={trust_score}")
+
+                                        # GRAY ZONE — Uncertainty / novel vocabulary, do nothing
+                                        elif score <= 0.85:
+                                            print(f"DEBUG: Gray Zone — no change | score={score:.3f} | trust={trust_score}")
+
+                                        # GREEN ZONE — Clear stylometric match, reward
                                         else:
-                                            print(f"DEBUG: Current Trust Score: {trust_score}, Change: 0.0 (Neutral)")
-                                            
+                                            trust_score = min(100.0, trust_score + 5.0)
+                                            print(f"DEBUG: Green Zone — reward +5.0 | score={score:.3f} | trust={trust_score}")
+
                                         # Send trust update to UI
                                         await websocket.send_json({
                                             "type": "trust_update",
@@ -214,7 +212,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                             "confidence": float(round(confidence, 4)),
                                             "status": "active"
                                         })
-                                        
+
                                         # Session Freeze Check (Only if enforcement is ON)
                                         if enforce_security and trust_score < 40.0:
                                             await websocket.close(code=4001, reason="Session locked due to unusual typing behavior")
