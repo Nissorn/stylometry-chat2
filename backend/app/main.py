@@ -80,7 +80,19 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
 
         # Session State
         trust_score = 100.0
-        msg_buffer = deque(maxlen=5)
+
+        # Pre-fill buffer with last 4 baseline messages so the first new message
+        # is averaged with historical context, eliminating both the "free messages"
+        # vulnerability AND the instant-kick edge case from a single CNN anomaly.
+        _baseline_prefill_path = os.path.join("/ml_workspace/data", f"{username}_baseline.txt")
+        try:
+            with open(_baseline_prefill_path, "r", encoding="utf-8") as _f:
+                _all_lines = [l.strip() for l in _f if l.strip()]
+            _seed_msgs = _all_lines[-4:] if len(_all_lines) >= 4 else _all_lines
+        except FileNotFoundError:
+            _seed_msgs = []
+        msg_buffer = deque(_seed_msgs, maxlen=5)
+        print(f"DEBUG: Session started for {username} — buffer pre-filled with {len(_seed_msgs)} baseline messages")
 
         try:
             async with httpx.AsyncClient() as client:
@@ -127,8 +139,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                 except Exception as e:
                                     print(f"DEBUG: Failed to write baseline data or trigger training: {e}")
                         
-                        # Check buffer sliding window
-                        if len(msg_buffer) == 5:
+                        # Evaluate from message 1 (deque maxlen=5 handles sliding window automatically)
+                        if len(msg_buffer) >= 1:
                             if not enforce_security:
                                 # Bypass ML service completely
                                 trust_score = 100.0  # Reset/Maintain at 100
@@ -171,25 +183,25 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                                 baseline_count = sum(1 for line in f if line.strip())
                                         except FileNotFoundError:
                                             baseline_count = 0
-                                        # Reward Logic
-                                        if confidence > 0.85:
+                                        # Reward Logic: only reward truly high confidence
+                                        if confidence >= 0.90:
                                             change_val = 5.0
                                             trust_score = min(100.0, trust_score + change_val)
                                             print(f"DEBUG: Current Trust Score: {trust_score}, Change: +{change_val} (Reward)")
-                                        # Penalty Logic
-                                        elif confidence < 0.7:
+                                        # Penalty Logic: penalise anything below 0.75
+                                        elif confidence < 0.75:
                                             if baseline_count <= 20:
                                                 penalty_multiplier = 0.0
                                             elif baseline_count <= 60:
                                                 penalty_multiplier = 10.0
                                             elif baseline_count <= 120:
-                                                penalty_multiplier = 25.0
+                                                penalty_multiplier = 30.0
                                             elif baseline_count <= 200:
-                                                penalty_multiplier = 60.0
+                                                penalty_multiplier = 80.0
                                             else:
-                                                penalty_multiplier = 120.0
+                                                penalty_multiplier = 150.0
                                                 
-                                            change_val = float((0.7 - confidence) * penalty_multiplier)
+                                            change_val = float((0.75 - confidence) * penalty_multiplier)
                                             trust_score = max(0.0, trust_score - change_val)
                                             print(f"DEBUG: Current Trust Score: {trust_score}, Change: -{change_val} (Penalty Multiplier: {penalty_multiplier})")
                                         else:
