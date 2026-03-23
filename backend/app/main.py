@@ -181,13 +181,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                             if baseline_count <= 20:
                                                 penalty_multiplier = 0.0
                                             elif baseline_count <= 60:
-                                                penalty_multiplier = 15.0
+                                                penalty_multiplier = 10.0
                                             elif baseline_count <= 120:
-                                                penalty_multiplier = 40.0
+                                                penalty_multiplier = 25.0
                                             elif baseline_count <= 200:
-                                                penalty_multiplier = 100.0
+                                                penalty_multiplier = 60.0
                                             else:
-                                                penalty_multiplier = 200.0
+                                                penalty_multiplier = 120.0
                                                 
                                             change_val = float((0.7 - confidence) * penalty_multiplier)
                                             trust_score = max(0.0, trust_score - change_val)

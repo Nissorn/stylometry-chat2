@@ -59,8 +59,11 @@ ML_WORKSPACE = "/ml_workspace/models"
 BASE_CNN_MODEL = None
 BASE_VOCAB = None
 
-_BASE_WEIGHTS = "/app/base_char_cnn.pth"
-_BASE_VOCAB   = "/app/base_char_cnn_vocab.json"
+_BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
+_BASE_WEIGHTS = os.path.join(_BASE_DIR, "base_char_cnn.pth")
+_BASE_VOCAB   = os.path.join(_BASE_DIR, "base_char_cnn_vocab.json")
+
+print(f"DEBUG: Looking for CNN model at {_BASE_WEIGHTS}")
 
 if os.path.exists(_BASE_WEIGHTS) and os.path.exists(_BASE_VOCAB):
     try:
