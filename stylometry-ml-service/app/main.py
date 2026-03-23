@@ -159,7 +159,7 @@ def predict(req: PredictRequest):
     xgb_path = os.path.join(user_dir, "xgb_model.pkl")
     
     if not os.path.exists(xgb_path):
-        return {"confidence_score": 1.0, "status": "cold_start"}
+        return {"confidence_score": 1.0, "latest_message_confidence": 1.0, "status": "cold_start"}
         
     try:
         with open(vocab_path, "r") as f:
@@ -182,7 +182,7 @@ def predict(req: PredictRequest):
     # Process each message individually and average the scores
     valid_msgs = [m for m in req.messages if m.strip()]
     if not valid_msgs:
-        return {"confidence_score": 1.0, "status": "active"}
+        return {"confidence_score": 1.0, "latest_message_confidence": 1.0, "status": "active"}
 
     # Process Late Fusion for each message INDIVIDUALLY
     confidences = []
@@ -209,8 +209,13 @@ def predict(req: PredictRequest):
         confidences.append(float(prob))
         
     confidence = float(np.mean(confidences))
+    latest_conf = float(confidences[-1]) if confidences else 1.0
     
     print(f"DEBUG: Individual message confidences: {confidences}")
-    print(f"DEBUG: Final Average Confidence Score for {req.username}: {confidence}")
+    print(f"DEBUG: Final Average Confidence Score for {req.username}: {confidence} | Latest: {latest_conf}")
     
-    return {"confidence_score": confidence, "status": "active"}
+    return {
+        "confidence_score": confidence, 
+        "latest_message_confidence": latest_conf,
+        "status": "active"
+    }

@@ -150,6 +150,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                 if response.status_code == 200:
                                     ml_data = response.json()
                                     confidence = float(ml_data.get("confidence_score", 1.0))
+                                    latest_message_confidence = float(ml_data.get("latest_message_confidence", 1.0))
                                     status_msg = ml_data.get("status", "active")
                                     print(f"DEBUG: Received from ML Service -> Status: {status_msg}, Score: {confidence}")
                                     
@@ -170,7 +171,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                                 baseline_count = sum(1 for line in f if line.strip())
                                         except FileNotFoundError:
                                             baseline_count = 0
-                                            
                                         # Reward Logic
                                         if confidence > 0.85:
                                             change_val = 5.0
@@ -185,9 +185,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                             elif baseline_count <= 120:
                                                 penalty_multiplier = 40.0
                                             elif baseline_count <= 200:
-                                                penalty_multiplier = 80.0
+                                                penalty_multiplier = 100.0
                                             else:
-                                                penalty_multiplier = 150.0
+                                                penalty_multiplier = 200.0
                                                 
                                             change_val = float((0.7 - confidence) * penalty_multiplier)
                                             trust_score = max(0.0, trust_score - change_val)
