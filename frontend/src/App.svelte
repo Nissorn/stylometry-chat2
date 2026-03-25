@@ -183,7 +183,8 @@
       const data = await response.json();
       
       if (!response.ok) {
-        errorMessage = data.detail || "Authentication failed";
+        // FastAPI returns detail as Array of objects (422) or String (400)
+        errorMessage = Array.isArray(data.detail) ? data.detail[0].msg : (data.detail || "Authentication failed");
         return;
       }
       
@@ -220,7 +221,7 @@
         qrCodeBase64 = data.qr_code;
         totpSecretText = data.secret;
       } else {
-        errorMessage = data.detail || "Failed to generate 2FA";
+        errorMessage = Array.isArray(data.detail) ? data.detail[0].msg : (data.detail || "Failed to generate 2FA");
       }
     } catch (error) {
       errorMessage = "Network Error during 2FA generation";
@@ -259,7 +260,7 @@
           localStorage.setItem("token", token);
         }
       } else {
-        errorMessage = data.detail || "Invalid 2FA Code";
+        errorMessage = Array.isArray(data.detail) ? data.detail[0].msg : (data.detail || "Invalid 2FA Code");
       }
     } catch (error) {
       errorMessage = "Network Error verifying 2FA";

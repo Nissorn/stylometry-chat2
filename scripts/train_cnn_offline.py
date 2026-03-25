@@ -37,7 +37,7 @@ from torch.utils.data import Dataset, DataLoader
 # -----------------------------------------------------------------------
 parser = argparse.ArgumentParser(description="Offline CharCNN pre-trainer")
 parser.add_argument("--inbox_dir", type=str,
-                    default="/Users/onis2/Project/StylometryAI/Stylometry/messages/inbox",
+                    default="./ml_workspace/inbox",
                     help="Path to the messages/inbox directory with JSON exports")
 parser.add_argument("--owner_name", type=str, default="O",
                     help="The sender_name that belongs to YOU (positive class)")
