@@ -23,13 +23,17 @@ def _load_fernet() -> Fernet:
     raw_key = os.environ.get("ENCRYPTION_KEY", "").strip()
     if raw_key:
         try:
-            return Fernet(raw_key.encode())
+            f = Fernet(raw_key.encode())
+            print("[CRYPTO] Using shared ENCRYPTION_KEY from environment")
+            return f
         except Exception:
+            print("[CRYPTO] ERROR: ENCRYPTION_KEY env-var is invalid Fernet key!")
             logger.warning(
                 "ENCRYPTION_KEY env-var is set but is not a valid Fernet key. "
                 "Falling back to an ephemeral dev key — DO NOT use in production."
             )
     dev_key = Fernet.generate_key()
+    print("[CRYPTO] WARNING: ENCRYPTION_KEY not found! Using ephemeral fallback key. DECRYPTION WILL FAIL ACROSS SERVICES.")
     logger.warning(
         "ENCRYPTION_KEY not set — using an ephemeral dev key. "
         "All ciphertexts written by backend will be UNREADABLE here unless "
