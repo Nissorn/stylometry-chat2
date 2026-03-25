@@ -57,16 +57,16 @@
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
   onMount(() => {
-    const storedToken    = localStorage.getItem("token");
-    const storedUser     = localStorage.getItem("username");
-    const storedTotp     = localStorage.getItem("isTotpEnabled");
-    const storedSecMode  = localStorage.getItem("securityModeEnabled");
+    const storedToken = localStorage.getItem("token");
+    const storedUser  = localStorage.getItem("username");
     if (storedToken && storedUser) {
-      token              = storedToken;
-      currentUser        = storedUser;
-      if (storedTotp    === "true") isTotpEnabled      = true;
-      if (storedSecMode === "true") securityModeEnabled = true;
-      isAuthenticated    = true;
+      token               = storedToken;
+      currentUser         = storedUser;
+      // Unconditional === "true" comparisons: always assign both true and false
+      // so stale in-memory defaults can never silently override stored state.
+      isTotpEnabled       = localStorage.getItem("isTotpEnabled")       === "true";
+      securityModeEnabled = localStorage.getItem("securityModeEnabled") === "true";
+      isAuthenticated     = true;
     }
   });
 
@@ -335,13 +335,20 @@
         return;
       }
 
-      token        = data.access_token;
-      currentUser  = username;
-      isTotpEnabled = data.is_totp_enabled || false;
+      console.log("Login Response from Backend:", data);
 
-      localStorage.setItem("token",         token);
-      localStorage.setItem("username",      currentUser);
-      localStorage.setItem("isTotpEnabled", isTotpEnabled.toString());
+      token               = data.access_token;
+      currentUser         = username;
+      // Strict === true comparison — avoids falsy-coercion bugs where a
+      // missing field (undefined) and an explicit false both collapse to false
+      // correctly, and a genuine true is never accidentally cast to something else.
+      isTotpEnabled       = data.is_totp_enabled  === true;
+      securityModeEnabled = data.security_enabled  === true;
+
+      localStorage.setItem("token",               token);
+      localStorage.setItem("username",            currentUser);
+      localStorage.setItem("isTotpEnabled",       isTotpEnabled.toString());
+      localStorage.setItem("securityModeEnabled", securityModeEnabled.toString());
       isAuthenticated = true;
 
     } catch (error) {

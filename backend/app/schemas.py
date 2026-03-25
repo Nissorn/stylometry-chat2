@@ -12,6 +12,7 @@ class Token(BaseModel):
     access_token: str
     token_type: str
     is_totp_enabled: bool = False
+    security_enabled: bool = False
 
 
 class LoginRequest(BaseModel):

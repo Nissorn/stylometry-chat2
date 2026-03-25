@@ -107,6 +107,7 @@ def login(req: schemas.LoginRequest, db: Session = Depends(database.get_db)):
         "access_token": access_token,
         "token_type": "bearer",
         "is_totp_enabled": user.is_totp_enabled,
+        "security_enabled": user.security_enabled,
     }
 
 
