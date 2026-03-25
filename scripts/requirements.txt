@@ -1,1 +1,12 @@
+# Auto-Injector runtime dependencies
+# ------------------------------------
+# Third-party packages (install via: pip install -r requirements.txt)
 websockets==15.0.1
+
+# Standard-library modules used by auto_injector.py (no install needed)
+# - asyncio       async event loop + tasks
+# - argparse      CLI argument parsing
+# - json          payload serialisation
+# - random        inter-message delay jitter
+# - urllib.request  synchronous REST call to /auth/security/enable
+# - urllib.error    HTTPError handling for the REST pre-flight
