@@ -4,9 +4,9 @@ import json
 import random
 import urllib.error
 import urllib.request
+from typing import Optional
 
 import websockets
-from typing import Optional
 
 # ---------------------------------------------------------------------------
 # REST helper — enable step-up security before opening the WebSocket
@@ -132,6 +132,32 @@ async def run_injector(
                                     "    [AUTO-REPLY] ⚠️  No --pin supplied; "
                                     "cannot respond to auth_challenge. Session will remain frozen."
                                 )
+
+                        elif msg_type == "require_confirmation":
+                            # ── Auto ownership confirmation ────────────────
+                            # The server has accepted the PIN and now asks
+                            # whether the injector-controlled user actually
+                            # typed the held message.  Since the injector
+                            # always represents the legitimate account owner,
+                            # we unconditionally confirm ownership so the
+                            # pending message is saved to the baseline and
+                            # broadcast to all connected clients.
+                            pending_msg = data.get("pending_message", "")
+                            print(
+                                f"--> [REQUIRE_CONFIRMATION] "
+                                f'Held message: "{pending_msg}"'
+                            )
+                            print(
+                                "[SECURITY] Confirmation required. "
+                                "Auto-confirming ownership..."
+                            )
+                            reply = json.dumps(
+                                {"type": "confirm_message", "is_owner": True}
+                            )
+                            await websocket.send(reply)
+                            print(
+                                "    [AUTO-REPLY] confirm_message is_owner=True sent."
+                            )
 
                         elif msg_type == "auth_success":
                             print(f"--> [AUTH_SUCCESS] {data.get('message', '')}")

@@ -186,8 +186,14 @@ manager = ConnectionManager()
 # Phase 8: Session Freeze + Secondary PIN (Step-Up Auth) + System Alert
 # - [x] ConnectionManager: user_states, pending_messages, lock/unlock, broadcast_except
 # - [x] WebSocket: step-up challenge when trust < 40 and security_enabled
-# - [x] WebSocket: verify_pin handler — PIN check, unlock, emit pending message
+# - [x] WebSocket: verify_pin handler — PIN check → require_confirmation (stay LOCKED)
 # - [x] REST: POST /auth/security/enable (JWT-protected, bcrypt PIN hash)
+
+# Phase 9: Post-Freeze Confirmation (Baseline Integrity Guard)
+# - [x] WebSocket: verify_pin correct → send require_confirmation, keep LOCKED (no auto-save)
+# - [x] WebSocket: confirm_message — is_owner=True saves+broadcasts; False discards silently
+# - [x] Frontend: two-stage modal  pin_input → confirmation quote block
+# - [x] Injector: auto-confirm ownership on require_confirmation
 async def websocket_endpoint(
     websocket: WebSocket,
     token: str = None,
@@ -290,68 +296,24 @@ async def websocket_endpoint(
                             )
 
                             if pin_ok:
-                                manager.unlock(username)
-
-                                # Explicit local-scope reset — trust_score is a
-                                # plain float; re-assign to guarantee the updated
-                                # value is used by every subsequent expression in
-                                # this coroutine's local frame.
-                                trust_score = 100.0
-
-                                # 1. Notify sender first
+                                # PIN correct — do NOT unlock yet.
+                                # Move to the confirmation step: ask the user
+                                # whether they actually typed the pending message.
+                                # The session stays LOCKED until confirm_message
+                                # is received, so impostor text can never reach
+                                # the baseline or other users' screens.
+                                pending_text = manager.pending_messages.get(
+                                    username, ""
+                                )
                                 await websocket.send_json(
                                     {
-                                        "type": "auth_success",
-                                        "message": "✅ Identity verified. Session fully restored.",
+                                        "type": "require_confirmation",
+                                        "pending_message": pending_text,
                                     }
                                 )
-
-                                # 2. Deliver the pending message that triggered
-                                #    the lock — encrypt, persist, then broadcast.
-                                pending_text = manager.pending_messages.pop(
-                                    username, None
-                                )
-                                if pending_text:
-                                    # Encrypt and persist to baseline on-disk
-                                    try:
-                                        data_dir = "/ml_workspace/data"
-                                        os.makedirs(data_dir, exist_ok=True)
-                                        baseline_path = os.path.join(
-                                            data_dir, f"{username}_baseline.txt"
-                                        )
-                                        ciphertext_line = encrypt(pending_text)
-                                        with open(
-                                            baseline_path, "a", encoding="utf-8"
-                                        ) as fh:
-                                            fh.write(ciphertext_line + "\n")
-                                    except Exception as exc:
-                                        print(
-                                            f"DEBUG: Failed to persist pending message "
-                                            f"for {username}: {exc}"
-                                        )
-
-                                    # Broadcast the recovered message to everyone
-                                    await manager.broadcast(
-                                        {
-                                            "type": "chat",
-                                            "sender": username,
-                                            "message": pending_text,
-                                            "trust_score": round(trust_score, 2),
-                                            "is_broadcast": True,
-                                        }
-                                    )
-
-                                # 3. Clear the system alert on all other clients
-                                await manager.broadcast_except(
-                                    username,
-                                    {
-                                        "type": "system_alert",
-                                        "message": (
-                                            f"✅ {username}'s identity has been verified. "
-                                            "Session fully restored."
-                                        ),
-                                        "clear": True,
-                                    },
+                                print(
+                                    f"DEBUG: PIN verified for {username} — "
+                                    "awaiting ownership confirmation"
                                 )
 
                             else:
@@ -366,9 +328,90 @@ async def websocket_endpoint(
                         # fall through to normal message processing.
                         continue
 
-                    # ── While LOCKED: silently discard non-PIN frames ────────
+                    # ── Step-Up Auth: confirm_message ────────────────────────
+                    # Processed only while LOCKED (after a successful verify_pin).
+                    # The user confirms whether the held message was genuinely theirs.
+                    if msg_type == "confirm_message":
+                        if manager.user_states.get(username) == "LOCKED":
+                            is_owner = bool(data.get("is_owner", False))
+
+                            # Snapshot the pending text BEFORE unlock() pops it
+                            pending_text = manager.pending_messages.get(username, None)
+
+                            # Restore the session regardless of the decision —
+                            # trust is reset to 100 in both branches.
+                            manager.unlock(username)
+                            trust_score = 100.0
+
+                            if is_owner and pending_text:
+                                # ── Owner confirmed ───────────────────────────
+                                # Encrypt, persist to baseline, then broadcast.
+                                try:
+                                    data_dir = "/ml_workspace/data"
+                                    os.makedirs(data_dir, exist_ok=True)
+                                    baseline_path = os.path.join(
+                                        data_dir, f"{username}_baseline.txt"
+                                    )
+                                    ciphertext_line = encrypt(pending_text)
+                                    with open(
+                                        baseline_path, "a", encoding="utf-8"
+                                    ) as fh:
+                                        fh.write(ciphertext_line + "\n")
+                                    print(
+                                        f"DEBUG: Pending message saved to baseline "
+                                        f"for {username} (owner confirmed)"
+                                    )
+                                except Exception as exc:
+                                    print(
+                                        f"DEBUG: Failed to persist pending message "
+                                        f"for {username}: {exc}"
+                                    )
+
+                                await manager.broadcast(
+                                    {
+                                        "type": "chat",
+                                        "sender": username,
+                                        "message": pending_text,
+                                        "trust_score": round(trust_score, 2),
+                                        "is_broadcast": True,
+                                    }
+                                )
+                                print(
+                                    f"DEBUG: Pending message broadcast for {username} "
+                                    "(owner confirmed)"
+                                )
+
+                            else:
+                                # ── Impostor reported ─────────────────────────
+                                # Silently discard: no write to baseline, no
+                                # broadcast — baseline integrity fully preserved.
+                                print(
+                                    f"DEBUG: Pending message discarded for {username} "
+                                    "(impostor declared — baseline protected)"
+                                )
+
+                            # Notify the sender that the session is restored
+                            await websocket.send_json({"type": "auth_success"})
+
+                            # Clear the system alert on all other clients
+                            await manager.broadcast_except(
+                                username,
+                                {
+                                    "type": "system_alert",
+                                    "message": (
+                                        f"✅ {username}'s identity has been verified. "
+                                        "Session fully restored."
+                                    ),
+                                    "clear": True,
+                                },
+                            )
+
+                        # Consume the frame regardless of lock state
+                        continue
+
+                    # ── While LOCKED: silently discard non-PIN/confirm frames ─
                     if manager.user_states.get(username) == "LOCKED":
-                        # User must pass PIN verification before chatting again.
+                        # User must complete the confirmation step before chatting.
                         continue
 
                     # ── Normal message processing ────────────────────────────

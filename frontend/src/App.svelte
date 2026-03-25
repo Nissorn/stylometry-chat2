@@ -36,10 +36,14 @@
   // { message: string } → show warning pill
   let systemAlert = null;
 
-  // ── Step-Up Auth: Challenge Modal (strictly blocking) ─────────────────────
+  // ── Step-Up Auth: Challenge Modal (strictly blocking, two-stage) ──────────
+  // pinModalStage: "pin_input" → user enters 6-digit PIN
+  //                "confirmation" → user confirms ownership of the held message
   let showPinModal = false;
+  let pinModalStage = "pin_input";   // "pin_input" | "confirmation"
   let pinInput = "";
   let pinError = "";
+  let pendingMessageForConfirmation = ""; // populated by require_confirmation payload
 
   // ── Security Mode Setup (Enable Security Mode flow) ───────────────────────
   let securityModeEnabled = false;      // true once the user has registered a PIN
@@ -95,18 +99,28 @@
         trustScore = data.trust_score;
 
       } else if (data.type === "auth_challenge") {
-        // Freeze UI — show blocking PIN modal; user cannot dismiss it
-        pinError = "";
-        pinInput = "";
-        showPinModal = true;
+        // Freeze UI — enter PIN input stage; user cannot dismiss the modal
+        pinError      = "";
+        pinInput      = "";
+        pinModalStage = "pin_input";
+        showPinModal  = true;
+
+      } else if (data.type === "require_confirmation") {
+        // PIN accepted — switch to the ownership confirmation stage.
+        // Do NOT close the modal; keep the session visually frozen.
+        pendingMessageForConfirmation = data.pending_message || "";
+        pinModalStage = "confirmation";
+        // showPinModal stays true
 
       } else if (data.type === "auth_success") {
-        // Server confirmed PIN — close the modal and clear any previous error
-        showPinModal  = false;
-        pinInput      = "";
-        pinError      = "";
+        // Confirmation received by server — close the modal entirely
+        showPinModal                  = false;
+        pinModalStage                 = "pin_input";
+        pinInput                      = "";
+        pinError                      = "";
+        pendingMessageForConfirmation = "";
         // Also clear the local system alert (our own session is clean again)
-        systemAlert   = null;
+        systemAlert                   = null;
 
       } else if (data.type === "system_alert") {
         if (data.clear) {
@@ -163,9 +177,7 @@
   function submitPin() {
     if (!ws || pinInput.length !== 6) return;
     ws.send(JSON.stringify({ type: "verify_pin", pin: pinInput }));
-    // Keep input visible but clear the value while waiting for server response
     pinInput = "";
-    // Show "checking…" feedback by clearing previous error
     pinError = "Verifying…";
   }
 
@@ -173,9 +185,14 @@
     if (e.key === "Enter") submitPin();
   }
 
-  // Intercept auth_challenge "wrong pin" — server re-sends auth_challenge
-  // so we just update the error text from the server message
-  // (handled inside ws.onmessage above via re-showing modal + setting pinError)
+  // ── Step-Up Auth: ownership confirmation ───────────────────────────────────
+  // Called by the two confirmation buttons in the modal's second stage.
+  // isOwner = true  → server saves the held message to baseline and broadcasts it
+  // isOwner = false → server silently discards it (baseline integrity preserved)
+  function confirmOwnership(isOwner) {
+    if (!ws) return;
+    ws.send(JSON.stringify({ type: "confirm_message", is_owner: isOwner }));
+  }
 
   // ── Chat ───────────────────────────────────────────────────────────────────
   function sendChatMessage() {
@@ -401,11 +418,13 @@
 <svelte:window on:keydown={handleWindowKeydown} />
 
 <!-- ═══════════════════════════════════════════════════════════════════════════
-     STEP-UP AUTH — Blocking PIN Challenge Modal
-     • No close button, no backdrop click, ESC is captured by svelte:window
+     STEP-UP AUTH — Blocking Two-Stage Modal
+     Stage 1 "pin_input"    — user enters their 6-digit Security PIN
+     Stage 2 "confirmation" — user confirms whether they typed the held message
+     • No close button, no backdrop click, ESC captured by svelte:window
      ═══════════════════════════════════════════════════════════════════════════ -->
 {#if showPinModal}
-  <!-- Full-screen overlay; pointer-events:all ensures nothing beneath is clickable -->
+  <!-- Full-screen overlay; pointer-events:all blocks everything underneath -->
   <div
     class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
     style="pointer-events: all;"
@@ -418,54 +437,96 @@
       class="bg-base-100 rounded-2xl shadow-2xl w-full max-w-sm mx-4 p-8 border-2 border-error"
       on:click|stopPropagation
     >
-      <!-- Header -->
-      <div class="flex flex-col items-center mb-6">
-        <div class="text-5xl mb-3 animate-pulse">🔐</div>
-        <h3 id="pin-modal-title" class="text-xl font-bold text-error text-center">
-          Identity Verification Required
-        </h3>
-        <p class="text-sm text-base-content/70 text-center mt-2 leading-relaxed">
-          Unusual typing pattern detected.<br />
-          Enter your 6-digit Security PIN to resume your session.
+
+      {#if pinModalStage === "pin_input"}
+        <!-- ── Stage 1: PIN entry ───────────────────────────────────────── -->
+        <div class="flex flex-col items-center mb-6">
+          <div class="text-5xl mb-3 animate-pulse">🔐</div>
+          <h3 id="pin-modal-title" class="text-xl font-bold text-error text-center">
+            Identity Verification Required
+          </h3>
+          <p class="text-sm text-base-content/70 text-center mt-2 leading-relaxed">
+            Unusual typing pattern detected.<br />
+            Enter your 6-digit Security PIN to resume your session.
+          </p>
+        </div>
+
+        <div class="form-control mb-4">
+          <input
+            type="password"
+            inputmode="numeric"
+            maxlength="6"
+            pattern="[0-9]{6}"
+            placeholder="••••••"
+            class="input input-bordered input-error w-full text-center tracking-[0.6em] text-2xl font-bold"
+            bind:value={pinInput}
+            on:keydown={handlePinKeydown}
+            autofocus
+          />
+        </div>
+
+        {#if pinError}
+          <p class="text-sm text-center mb-3
+            {pinError === 'Verifying…' ? 'text-info animate-pulse' : 'text-error font-semibold'}">
+            {pinError}
+          </p>
+        {/if}
+
+        <button
+          class="btn btn-error w-full text-white font-bold"
+          on:click={submitPin}
+          disabled={pinInput.length !== 6}
+        >
+          Verify PIN
+        </button>
+
+        <p class="text-[10px] text-base-content/40 text-center mt-4 uppercase tracking-widest">
+          Session frozen · All messages held until verified
         </p>
-      </div>
 
-      <!-- PIN input -->
-      <div class="form-control mb-4">
-        <input
-          type="password"
-          inputmode="numeric"
-          maxlength="6"
-          pattern="[0-9]{6}"
-          placeholder="••••••"
-          class="input input-bordered input-error w-full text-center tracking-[0.6em] text-2xl font-bold"
-          bind:value={pinInput}
-          on:keydown={handlePinKeydown}
-          autofocus
-        />
-      </div>
+      {:else if pinModalStage === "confirmation"}
+        <!-- ── Stage 2: Ownership confirmation ────────────────────────── -->
+        <div class="flex flex-col items-center mb-5">
+          <div class="text-5xl mb-3">🤔</div>
+          <h3 id="pin-modal-title" class="text-xl font-bold text-warning text-center">
+            Unusual Typing Detected
+          </h3>
+          <p class="text-sm text-base-content/70 text-center mt-2">
+            Did <span class="font-bold text-base-content">you</span> type this message?
+          </p>
+        </div>
 
-      <!-- Error / status feedback -->
-      {#if pinError}
-        <p class="text-sm text-center mb-3
-          {pinError === 'Verifying…' ? 'text-info animate-pulse' : 'text-error font-semibold'}">
-          {pinError}
+        <!-- Held message quote block -->
+        <div class="bg-base-200 border-l-4 border-warning rounded-lg px-4 py-3 mb-6">
+          <p class="text-xs uppercase tracking-wider text-base-content/50 mb-1 font-semibold">
+            Held message
+          </p>
+          <p class="text-sm text-base-content leading-relaxed italic break-words">
+            "{pendingMessageForConfirmation}"
+          </p>
+        </div>
+
+        <!-- Confirmation buttons -->
+        <div class="flex gap-3">
+          <button
+            class="btn btn-success flex-1"
+            on:click={() => confirmOwnership(true)}
+          >
+            ✅ Yes, it was me
+          </button>
+          <button
+            class="btn btn-error flex-1"
+            on:click={() => confirmOwnership(false)}
+          >
+            🗑️ No, delete it
+          </button>
+        </div>
+
+        <p class="text-[10px] text-base-content/40 text-center mt-4 uppercase tracking-widest">
+          "No" protects the baseline · Message will not be broadcast
         </p>
       {/if}
 
-      <!-- Verify button -->
-      <button
-        class="btn btn-error w-full text-white font-bold"
-        on:click={submitPin}
-        disabled={pinInput.length !== 6}
-      >
-        Verify PIN
-      </button>
-
-      <!-- Subtle warning footer -->
-      <p class="text-[10px] text-base-content/40 text-center mt-4 uppercase tracking-widest">
-        Session frozen · All messages held until verified
-      </p>
     </div>
   </div>
 {/if}
