@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Header
 from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 from jose import jwt, JWTError
@@ -8,6 +8,7 @@ import qrcode
 import base64
 from io import BytesIO
 from datetime import datetime, timedelta
+from typing import Optional
 
 from . import models, schemas, database
 
@@ -98,3 +99,32 @@ def verify_totp(username: str, req: schemas.TOTPVerifyRequest, db: Session = Dep
     
     access_token = create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer", "is_totp_enabled": True}
+
+@router.post("/security/enable")
+def enable_security_mode(
+    req: schemas.EnableSecurityRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(database.get_db)
+):
+    """Enable Session Freeze + PIN Step-Up Auth for the authenticated user."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    
+    token = authorization.split(" ", 1)[1]
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if not username:
+            raise HTTPException(status_code=401, detail="Invalid token payload")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    user = db.query(models.User).filter(models.User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    user.unlock_pin_hash = get_password_hash(req.pin)
+    user.security_enabled = True
+    db.commit()
+    
+    return {"status": "success", "message": "Security Mode enabled. Session Freeze + PIN Step-Up Auth is now active."}

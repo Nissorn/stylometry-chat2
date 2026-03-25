@@ -31,6 +31,15 @@
   let showDebug = false;
   let securityEnforcement = true;
 
+  // Step-Up Auth State
+  let isSecurityModeEnabled = false;   // tracks whether security_enabled is set in DB
+  let isEnablingSecurityMode = false;  // shows the PIN-setup inline form
+  let enableSecurityPin = "";          // input for the setup flow
+  let enableSecurityError = "";        // inline error for setup
+  let showPinModal = false;            // FREEZE challenge — strictly blocking
+  let pinModalInput = "";             // 6-digit input for the challenge
+  let pinModalError = "";             // wrong-PIN feedback inside modal
+
   const API_BASE = "http://localhost:8000";
 
   onMount(() => {
@@ -57,12 +66,25 @@
       const data = JSON.parse(event.data);
       if (data.type === "chat") {
         // Broadcast format: {type:"chat", sender:username, message:text, is_broadcast:true}
-        // Legacy echo format: {type:"chat", sender:"me"/"bot", text:...}
         const text = data.is_broadcast ? data.message : (data.text || data.message || "");
         messages = [...messages, { sender: data.sender, text }];
         scrollToBottom();
       } else if (data.type === "trust_update") {
         trustScore = data.trust_score;
+      } else if (data.type === "auth_challenge") {
+        // FREEZE — show the strictly-blocking PIN modal
+        showPinModal = true;
+        pinModalInput = "";
+        pinModalError = "";
+      } else if (data.type === "auth_success") {
+        // Only auth_success from the server can close the modal
+        showPinModal = false;
+        pinModalError = "";
+      } else if (data.type === "auth_failed") {
+        pinModalError = "Incorrect PIN. Please try again.";
+      } else if (data.type === "system_alert") {
+        messages = [...messages, { type: "system_alert", text: data.message }];
+        scrollToBottom();
       } else if (data.sender && (data.text || data.message)) { // fallback
         const text = data.message || data.text;
         messages = [...messages, { sender: data.sender, text }];
@@ -114,6 +136,16 @@
       ws.send(JSON.stringify(payload));
       chatInput = "";
     }
+  }
+
+  function sendPinVerify() {
+    if (ws && pinModalInput.trim().length === 6) {
+      ws.send(JSON.stringify({ type: "verify_pin", pin: pinModalInput.trim() }));
+    }
+  }
+
+  function handlePinKeydown(event) {
+    if (event.key === "Enter") sendPinVerify();
   }
 
   function handleChatKeydown(event) {
@@ -265,6 +297,34 @@
       errorMessage = "Network Error verifying 2FA";
     }
   }
+  async function enableSecurityMode() {
+    if (enableSecurityPin.length !== 6 || !/^\d{6}$/.test(enableSecurityPin)) {
+      enableSecurityError = "PIN must be exactly 6 digits.";
+      return;
+    }
+    enableSecurityError = "";
+    try {
+      const response = await fetch(`${API_BASE}/auth/security/enable`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({ pin: enableSecurityPin })
+      });
+      const data = await response.json();
+      if (response.ok) {
+        isSecurityModeEnabled = true;
+        isEnablingSecurityMode = false;
+        enableSecurityPin = "";
+        successMessage = "✅ Security Mode enabled! Your session is now protected by PIN Step-Up Auth.";
+      } else {
+        enableSecurityError = data.detail || "Failed to enable Security Mode.";
+      }
+    } catch (e) {
+      enableSecurityError = "Network error. Please try again.";
+    }
+  }
 </script>
 
 <main class="min-h-screen flex items-center justify-center bg-base-200">
@@ -386,6 +446,35 @@
         {/if}
 
         <span class="text-sm font-semibold mr-2">Welcome, {currentUser}</span>
+
+        <!-- Enable Security Mode -->
+        {#if isSecurityModeEnabled}
+          <span class="badge badge-success badge-outline mr-2 text-xs">🛡 Security Mode: ON</span>
+        {:else if !isEnablingSecurityMode}
+          <button class="btn btn-outline btn-warning btn-xs mr-2" on:click={() => { isEnablingSecurityMode = true; enableSecurityPin = ""; enableSecurityError = ""; }}>
+            🔐 Enable Security Mode
+          </button>
+        {:else}
+          <!-- Inline PIN Setup Form -->
+          <div class="flex items-center gap-1 mr-2">
+            <input
+              type="password"
+              id="enable-security-pin"
+              placeholder="6-digit PIN"
+              maxlength="6"
+              inputmode="numeric"
+              class="input input-xs input-bordered w-24 text-center tracking-widest"
+              bind:value={enableSecurityPin}
+              on:keydown={(e) => { if (e.key === 'Enter') enableSecurityMode(); }}
+            />
+            <button class="btn btn-success btn-xs" on:click={enableSecurityMode} disabled={enableSecurityPin.length !== 6}>Save</button>
+            <button class="btn btn-ghost btn-xs" on:click={() => { isEnablingSecurityMode = false; enableSecurityPin = ""; enableSecurityError = ""; }}>✕</button>
+          </div>
+          {#if enableSecurityError}
+            <span class="text-error text-xs mr-2">{enableSecurityError}</span>
+          {/if}
+        {/if}
+
         <button class="btn btn-outline btn-error btn-sm" on:click={logout}>
           Logout
         </button>
@@ -408,14 +497,23 @@
           {/if}
           
           {#each messages as msg}
-            <div class="chat {msg.sender === currentUser ? 'chat-end' : 'chat-start'}">
-              <div class="chat-header text-xs opacity-50 mb-1">
-                {msg.sender}
+            {#if msg.type === "system_alert"}
+              <!-- Centered system alert — not a user bubble -->
+              <div class="flex justify-center my-3">
+                <div class="alert alert-warning text-xs max-w-lg text-center py-2 px-4 shadow rounded-full font-semibold opacity-90">
+                  {msg.text}
+                </div>
               </div>
-              <div class="chat-bubble {msg.sender === currentUser ? 'chat-bubble-primary' : 'chat-bubble-secondary'}">
-                {msg.text}
+            {:else}
+              <div class="chat {msg.sender === currentUser ? 'chat-end' : 'chat-start'}">
+                <div class="chat-header text-xs opacity-50 mb-1">
+                  {msg.sender}
+                </div>
+                <div class="chat-bubble {msg.sender === currentUser ? 'chat-bubble-primary' : 'chat-bubble-secondary'}">
+                  {msg.text}
+                </div>
               </div>
-            </div>
+            {/if}
           {/each}
         </div>
         
@@ -498,5 +596,59 @@
       </div>
     </div>
   </div>
+  {/if}
+
+  <!-- ───────────────────────────────────────────────────────────────── -->
+  <!-- STRICTLY BLOCKING PIN CHALLENGE MODAL                            -->
+  <!-- The ONLY exit is receiving auth_success from the WebSocket.      -->
+  <!-- There is no ESC handler, no backdrop click, no close button.     -->
+  <!-- ───────────────────────────────────────────────────────────────── -->
+  {#if showPinModal}
+    <div
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Identity Verification Required"
+    >
+      <div class="card w-full max-w-sm bg-base-100 shadow-2xl border-2 border-warning">
+        <div class="card-body items-center text-center gap-4">
+          <div class="text-4xl">🔐</div>
+          <h2 class="card-title text-xl text-warning">Identity Verification Required</h2>
+          <p class="text-sm text-base-content/70">
+            Unusual typing behavior detected. Enter your 6-digit Security PIN to resume.
+          </p>
+
+          {#if pinModalError}
+            <div class="alert alert-error text-sm py-2 w-full">
+              <span>{pinModalError}</span>
+            </div>
+          {/if}
+
+          <input
+            type="password"
+            id="pin-modal-input"
+            placeholder="● ● ● ● ● ●"
+            maxlength="6"
+            inputmode="numeric"
+            class="input input-bordered input-lg w-full text-center tracking-[0.5em] text-xl"
+            bind:value={pinModalInput}
+            on:keydown={handlePinKeydown}
+            autofocus
+          />
+
+          <button
+            class="btn btn-warning w-full btn-lg"
+            on:click={sendPinVerify}
+            disabled={pinModalInput.trim().length !== 6}
+          >
+            Verify Identity
+          </button>
+
+          <p class="text-xs text-base-content/40 mt-1">
+            Your session is paused until verification is complete.
+          </p>
+        </div>
+      </div>
+    </div>
   {/if}
 </main>

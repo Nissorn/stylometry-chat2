@@ -7,7 +7,7 @@ from collections import deque
 import asyncio
 import json
 import os
-from typing import Dict
+from typing import Dict, Optional
 
 from . import models, auth
 from .database import engine, get_db
@@ -35,31 +35,63 @@ def read_root():
 ML_SERVICE_URL = "http://stylometry-ml-service:8001/predict"
 
 # ---------------------------------------------------------------------------
-# Multi-User Connection Manager
+# Multi-User Connection Manager (with Session Freeze state machine)
 # ---------------------------------------------------------------------------
 class ConnectionManager:
     def __init__(self):
         # Maps username -> active WebSocket
         self.active_connections: Dict[str, WebSocket] = {}
+        # "ACTIVE" | "LOCKED"  —  default "ACTIVE"
+        self.user_states: Dict[str, str] = {}
+        # Stores the triggering plaintext message for frozen users
+        self.pending_messages: Dict[str, str] = {}
 
     async def connect(self, username: str, websocket: WebSocket):
         self.active_connections[username] = websocket
+        self.user_states[username] = "ACTIVE"
         print(f"DEBUG: ConnectionManager — {username} connected. Active: {list(self.active_connections.keys())}")
 
     def disconnect(self, username: str):
         self.active_connections.pop(username, None)
+        self.user_states.pop(username, None)
+        self.pending_messages.pop(username, None)
         print(f"DEBUG: ConnectionManager — {username} disconnected. Active: {list(self.active_connections.keys())}")
+
+    def lock(self, username: str):
+        self.user_states[username] = "LOCKED"
+        print(f"DEBUG: ConnectionManager — {username} LOCKED")
+
+    def unlock(self, username: str):
+        self.user_states[username] = "ACTIVE"
+        self.pending_messages.pop(username, None)
+        print(f"DEBUG: ConnectionManager — {username} UNLOCKED")
 
     async def broadcast(self, payload: dict):
         """Send payload to ALL currently connected users.
         Per-socket errors are swallowed so one dead socket never crashes others.
         """
-        dead: list[str] = []
+        dead: list = []
         for uname, ws in list(self.active_connections.items()):
             try:
                 await ws.send_json(payload)
             except Exception as e:
                 print(f"DEBUG: Broadcast failed for {uname}: {e} — marking for removal")
+                dead.append(uname)
+        for uname in dead:
+            self.active_connections.pop(uname, None)
+
+    async def broadcast_except(self, payload: dict, exclude_username: str):
+        """Send payload to all users EXCEPT the specified one.
+        Used for system alerts so the frozen user doesn't receive their own alert.
+        """
+        dead: list = []
+        for uname, ws in list(self.active_connections.items()):
+            if uname == exclude_username:
+                continue
+            try:
+                await ws.send_json(payload)
+            except Exception as e:
+                print(f"DEBUG: broadcast_except failed for {uname}: {e} — marking for removal")
                 dead.append(uname)
         for uname in dead:
             self.active_connections.pop(uname, None)
@@ -73,23 +105,13 @@ manager = ConnectionManager()
 # ---------------------------------------------------------------------------
 @app.websocket("/ws/chat")
 # Phase 5: Train on Demand & Predict Per User
-# - [x] Analyze ML Workspace & Data Pipelines
-# - [x] Redesign Architecture for "Train on Demand" (Approved)
-# - [x] Mount ML Workspace via `docker-compose.yml`
-# - [x] Implement `POST /train/{username}` endpoint (Dummy Orchestration)
-# - [x] Implement `POST /predict` endpoint (Cold Start Logic)
-# - [x] Update Backend socket hooks to respect `cold_start` and `active` status
-
 # Phase 6: Real Model Integration & Auto-Data Collection
-# - [x] Backend: Write messages securely to `/ml_workspace/data/{username}_baseline.txt` when Trust>90
-# - [x] Svelte: Add "Security Enforcement" Toggle to Navbar and transmit states
-# - [x] ML Service: Implement Stylometric Meta Features `StylometricFeatureExtractor`
-# - [x] ML Logic: Upgrade to `XGBClassifier`, refine Trust Score Penalty to 150x
-
 # Phase 7: Multi-User Chat + Encryption at Rest
-# - [x] ConnectionManager: broadcast authenticated messages to all users
-# - [x] Fernet AES-128: encrypt baseline messages on disk, decrypt in buffer pre-fill
-# - [x] Architect safeguards: finally-block disconnect, plaintext-first predict
+# Phase 8: Session Freeze + PIN Step-Up Auth + System Alert
+# - [x] ConnectionManager: user_states + pending_messages
+# - [x] trust<40 with security_enabled → LOCK, auth_challenge, system_alert
+# - [x] verify_pin: fresh DB query, reset loop-scoped trust_score, encrypt+save pending
+# - [x] Strictly blocking PIN modal on frontend
 async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Session = Depends(get_db)):
     await websocket.accept()
     if not token:
@@ -123,10 +145,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
         return
 
     # ── Session State ────────────────────────────────────────────────────────
-    trust_score = 100.0
+    trust_score = 100.0  # This local variable persists across all while-True iterations
 
-    # Pre-fill buffer with last 4 baseline messages.
-    # Each line may be Fernet ciphertext (new) or legacy plaintext (old).
+    # Pre-fill buffer with last 4 baseline messages (decrypt Fernet or fallback to raw)
     _baseline_prefill_path = os.path.join("/ml_workspace/data", f"{username}_baseline.txt")
     try:
         with open(_baseline_prefill_path, "r", encoding="utf-8") as _f:
@@ -138,7 +159,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
     except FileNotFoundError:
         _seed_msgs = []
     msg_buffer = deque(_seed_msgs, maxlen=5)
-    score_buffer = deque(maxlen=5)  # Tracks raw per-message confidence scores for strike counting
+    score_buffer = deque(maxlen=5)
     print(f"DEBUG: Session started for {username} — buffer pre-filled with {len(_seed_msgs)} baseline messages")
 
     # Register with the connection manager.
@@ -158,6 +179,66 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                     except Exception:
                         data = {"message": str(payload_txt), "enforce_security": False}
 
+                    # ── LOCKED STATE GATE ─────────────────────────────────────────────
+                    # If this user is currently frozen, only handle verify_pin payloads.
+                    if manager.user_states.get(username) == "LOCKED":
+                        if data.get("type") == "verify_pin":
+                            submitted_pin = str(data.get("pin", ""))
+                            # ARCHITECT SAFEGUARD 1: fresh DB query — never db.refresh()
+                            fresh_user = db.query(models.User).filter(
+                                models.User.username == username
+                            ).first()
+                            
+                            pin_ok = (
+                                fresh_user is not None
+                                and fresh_user.unlock_pin_hash is not None
+                                and auth.verify_password(submitted_pin, fresh_user.unlock_pin_hash)
+                            )
+                            
+                            if pin_ok:
+                                # ── SUCCESS ──────────────────────────────────────────
+                                manager.unlock(username)
+                                # ARCHITECT SAFEGUARD 2: reset the loop-scoped trust_score
+                                trust_score = 100.0
+                                print(f"DEBUG: PIN verified for {username} — trust_score reset to 100.0")
+
+                                # Save and broadcast the pending (triggering) message
+                                pending_text = manager.pending_messages.pop(username, None)
+                                if pending_text:
+                                    # Encrypt and save to baseline (continuous learning)
+                                    try:
+                                        data_dir = "/ml_workspace/data"
+                                        os.makedirs(data_dir, exist_ok=True)
+                                        baseline_path = os.path.join(data_dir, f"{username}_baseline.txt")
+                                        ciphertext_line = encrypt(pending_text)
+                                        with open(baseline_path, "a", encoding="utf-8") as f:
+                                            f.write(ciphertext_line + "\n")
+                                    except Exception as e:
+                                        print(f"DEBUG: Failed to save pending baseline message: {e}")
+                                    
+                                    # Broadcast the recovered message to all
+                                    await manager.broadcast({
+                                        "type": "chat",
+                                        "sender": username,
+                                        "message": pending_text,
+                                        "trust_score": round(trust_score, 2),
+                                        "is_broadcast": True
+                                    })
+
+                                await websocket.send_json({"type": "auth_success"})
+                                await manager.broadcast_except({
+                                    "type": "system_alert",
+                                    "message": f"✅ {username} has successfully verified their identity."
+                                }, exclude_username=username)
+                                print(f"DEBUG: {username} unlocked — session resumed")
+                            else:
+                                # ── FAILURE ───────────────────────────────────────────
+                                await websocket.send_json({"type": "auth_failed"})
+                                print(f"DEBUG: PIN verification failed for {username}")
+                        # Any other payload while LOCKED is silently ignored
+                        continue
+
+                    # ── NORMAL MESSAGE PROCESSING ─────────────────────────────────────
                     text = str(data.get("message", ""))
                     enforce_security = bool(data.get("enforce_security", False))
 
@@ -166,20 +247,16 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                     if len(clean_text) > 0:
                         msg_buffer.append(clean_text)
 
-                        # Auto-Collection (Baseline formulation)
-                        # IMPORTANT: encrypt AFTER predict, but BEFORE writing to disk
+                        # Auto-Collection: encrypt AFTER predict, BEFORE writing to disk
                         if trust_score > 90.0:
                             data_dir = "/ml_workspace/data"
                             try:
                                 os.makedirs(data_dir, exist_ok=True)
                                 baseline_path = os.path.join(data_dir, f"{username}_baseline.txt")
-
-                                # Encrypt the plaintext before persisting
                                 ciphertext_line = encrypt(clean_text)
                                 with open(baseline_path, "a", encoding="utf-8") as f:
                                     f.write(ciphertext_line + "\n")
 
-                                # Count lines (each ciphertext is a single line — no internal newlines)
                                 with open(baseline_path, "r", encoding="utf-8") as f:
                                     line_count = sum(1 for line in f if line.strip())
 
@@ -190,7 +267,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                             except Exception as e:
                                 print(f"DEBUG: Failed to write baseline data or trigger training: {e}")
 
-                    # Evaluate from message 1 (deque maxlen=5 handles sliding window automatically)
+                    # Evaluate from message 1
                     if len(msg_buffer) >= 1:
                         if not enforce_security:
                             # Bypass ML service completely
@@ -202,7 +279,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                 "status": "inactive",
                                 "message": "Status: Monitoring Disabled (Data Collection Mode)"
                             })
-                            # Still broadcast the message to all users even when security is OFF
                             await manager.broadcast({
                                 "type": "chat",
                                 "sender": username,
@@ -216,7 +292,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                             # SAFEGUARD: msg_buffer contains raw plaintext — /predict receives plaintext
                             ml_payload = {
                                 "username": username,
-                                "messages": list(msg_buffer)  # plaintext
+                                "messages": list(msg_buffer)
                             }
                             response = await client.post(ML_SERVICE_URL, json=ml_payload, timeout=5.0)
                             if response.status_code == 200:
@@ -234,8 +310,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                         "status": "cold_start",
                                         "message": "Collecting baseline data..."
                                     })
-                                    # Broadcast in cold_start too so the sender's message
-                                    # appears for all users
                                     await manager.broadcast({
                                         "type": "chat",
                                         "sender": username,
@@ -281,12 +355,41 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                         "status": "active"
                                     })
 
-                                    # Session Freeze Check (sender only, before broadcast)
+                                    # ── SESSION FREEZE / KICK CHECK ───────────────────
                                     if enforce_security and trust_score < 40.0:
-                                        await websocket.close(code=4001, reason="Session locked due to unusual typing behavior")
-                                        break
+                                        # ARCHITECT SAFEGUARD: db.refresh forces SQLAlchemy to bypass
+                                        # the session identity-map and reload the row from the DB.
+                                        # This is required because users may enable Security Mode
+                                        # AFTER the WebSocket connection was established, meaning
+                                        # the local `user` object would hold a stale security_enabled=False.
+                                        try:
+                                            db.refresh(user)
+                                        except Exception as db_err:
+                                            print(f"DEBUG: db.refresh failed ({db_err}) — falling back to hard kick")
+                                            await websocket.close(code=4001, reason="Session locked due to unusual typing behavior")
+                                            break
 
-                                    # Broadcast to ALL users only if sender is NOT kicked
+                                        if user.security_enabled:
+                                            # FREEZE — store pending message, challenge, alert others
+                                            manager.lock(username)
+                                            manager.pending_messages[username] = clean_text
+                                            await websocket.send_json({
+                                                "type": "auth_challenge",
+                                                "reason": "unusual_typing"
+                                            })
+                                            await manager.broadcast_except({
+                                                "type": "system_alert",
+                                                "message": f"⚠️ System Warning: {username} is exhibiting unusual typing behavior and has been temporarily locked for identity verification."
+                                            }, exclude_username=username)
+                                            print(f"DEBUG: {username} FROZEN — awaiting PIN challenge")
+                                        else:
+                                            # KICK — original behaviour for users without security mode
+                                            await websocket.close(code=4001, reason="Session locked due to unusual typing behavior")
+                                            break
+                                        # Either path: suppress the triggering message from chat
+                                        continue
+
+                                    # Broadcast only if NOT frozen/kicked
                                     await manager.broadcast({
                                         "type": "chat",
                                         "sender": username,
@@ -296,7 +399,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                     })
 
                         except httpx.RequestError as e:
-                            # Log ml service failure without crashing chat
                             print(f"ML Service error: {e}")
 
                 except WebSocketDisconnect:

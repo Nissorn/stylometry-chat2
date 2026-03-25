@@ -18,3 +18,6 @@ class LoginRequest(BaseModel):
 
 class TOTPVerifyRequest(BaseModel):
     totp_code: str = Field(..., pattern=r"^\d{6}$")
+
+class EnableSecurityRequest(BaseModel):
+    pin: str = Field(..., pattern=r"^\d{6}$")
