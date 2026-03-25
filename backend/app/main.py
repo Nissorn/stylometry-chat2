@@ -12,6 +12,7 @@ from typing import Dict
 from . import models, auth
 from .database import engine, get_db
 from .auth import router as auth_router
+from .chat import router as chat_router
 from .crypto import encrypt, decrypt
 
 models.Base.metadata.create_all(bind=engine)
@@ -27,6 +28,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router, prefix="/auth")
+app.include_router(chat_router, prefix="/chats")
 
 @app.get("/")
 def read_root():
@@ -39,31 +41,35 @@ ML_SERVICE_URL = "http://stylometry-ml-service:8001/predict"
 # ---------------------------------------------------------------------------
 class ConnectionManager:
     def __init__(self):
-        # Maps username -> active WebSocket
-        self.active_connections: Dict[str, WebSocket] = {}
+        # Maps chat_id -> (username -> active WebSocket)
+        self.active_rooms: Dict[int, Dict[str, WebSocket]] = {}
 
-    async def connect(self, username: str, websocket: WebSocket):
-        self.active_connections[username] = websocket
-        print(f"DEBUG: ConnectionManager — {username} connected. Active: {list(self.active_connections.keys())}")
+    async def connect(self, chat_id: int, username: str, websocket: WebSocket):
+        if chat_id not in self.active_rooms:
+            self.active_rooms[chat_id] = {}
+        self.active_rooms[chat_id][username] = websocket
+        print(f"DEBUG: ConnectionManager — {username} connected to room {chat_id}.")
 
-    def disconnect(self, username: str):
-        self.active_connections.pop(username, None)
-        print(f"DEBUG: ConnectionManager — {username} disconnected. Active: {list(self.active_connections.keys())}")
+    def disconnect(self, chat_id: int, username: str):
+        if chat_id in self.active_rooms:
+            self.active_rooms[chat_id].pop(username, None)
+            if not self.active_rooms[chat_id]:
+                del self.active_rooms[chat_id]
+        print(f"DEBUG: ConnectionManager — {username} disconnected from room {chat_id}.")
 
-    async def broadcast(self, payload: dict):
-        """Send payload to ALL currently connected users.
-        Per-socket errors are swallowed so one dead socket never crashes others.
-        """
+    async def broadcast(self, chat_id: int, payload: dict):
+        if chat_id not in self.active_rooms:
+            return
+            
         dead: list[str] = []
-        for uname, ws in list(self.active_connections.items()):
+        for uname, ws in list(self.active_rooms[chat_id].items()):
             try:
                 await ws.send_json(payload)
             except Exception as e:
-                print(f"DEBUG: Broadcast failed for {uname}: {e} — marking for removal")
+                print(f"DEBUG: Broadcast failed for {uname} in room {chat_id}: {e}")
                 dead.append(uname)
         for uname in dead:
-            self.active_connections.pop(uname, None)
-
+            self.active_rooms[chat_id].pop(uname, None)
 
 manager = ConnectionManager()
 
@@ -71,7 +77,7 @@ manager = ConnectionManager()
 # ---------------------------------------------------------------------------
 # WebSocket Chat Endpoint
 # ---------------------------------------------------------------------------
-@app.websocket("/ws/chat")
+@app.websocket("/ws/chat/{chat_id}")
 # Phase 5: Train on Demand & Predict Per User
 # - [x] Analyze ML Workspace & Data Pipelines
 # - [x] Redesign Architecture for "Train on Demand" (Approved)
@@ -90,7 +96,7 @@ manager = ConnectionManager()
 # - [x] ConnectionManager: broadcast authenticated messages to all users
 # - [x] Fernet AES-128: encrypt baseline messages on disk, decrypt in buffer pre-fill
 # - [x] Architect safeguards: finally-block disconnect, plaintext-first predict
-async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Session = Depends(get_db)):
+async def websocket_endpoint(websocket: WebSocket, chat_id: int, token: str = None, db: Session = Depends(get_db)):
     await websocket.accept()
     if not token:
         print("DEBUG: Connection closed due to missing token")
@@ -122,6 +128,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
+    member = db.query(models.ChatMember).filter(models.ChatMember.chat_id == chat_id, models.ChatMember.user_id == user.id).first()
+    if not member:
+        print(f"DEBUG: Connection closed - User {username} not in chat {chat_id}")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     # ── Session State ────────────────────────────────────────────────────────
     trust_score = 100.0
 
@@ -143,7 +155,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
 
     # Register with the connection manager.
     # The finally block guarantees disconnect even on exceptions or forced closes.
-    await manager.connect(username, websocket)
+    await manager.connect(chat_id, username, websocket)
 
     try:
         async with httpx.AsyncClient() as client:
@@ -165,6 +177,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                     clean_text = text.strip()
                     if len(clean_text) > 0:
                         msg_buffer.append(clean_text)
+                        
+                        new_msg = models.Message(chat_id=chat_id, sender_id=user.id, text=clean_text)
+                        db.add(new_msg)
+                        db.commit()
 
                         # Auto-Collection (Baseline formulation)
                         # IMPORTANT: encrypt AFTER predict, but BEFORE writing to disk
@@ -203,7 +219,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                 "message": "Status: Monitoring Disabled (Data Collection Mode)"
                             })
                             # Still broadcast the message to all users even when security is OFF
-                            await manager.broadcast({
+                            await manager.broadcast(chat_id, {
                                 "type": "chat",
                                 "sender": username,
                                 "message": text,
@@ -236,7 +252,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                     })
                                     # Broadcast in cold_start too so the sender's message
                                     # appears for all users
-                                    await manager.broadcast({
+                                    await manager.broadcast(chat_id, {
                                         "type": "chat",
                                         "sender": username,
                                         "message": text,
@@ -287,7 +303,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
                                         break
 
                                     # Broadcast to ALL users only if sender is NOT kicked
-                                    await manager.broadcast({
+                                    await manager.broadcast(chat_id, {
                                         "type": "chat",
                                         "sender": username,
                                         "message": text,
@@ -315,4 +331,4 @@ async def websocket_endpoint(websocket: WebSocket, token: str = None, db: Sessio
         print(f"DEBUG: Outer websocket exception for {username}: {e}")
     finally:
         # SAFEGUARD: guarantee cleanup regardless of disconnect cause
-        manager.disconnect(username)
+        manager.disconnect(chat_id, username)

@@ -1,0 +1,138 @@
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from typing import List
+from .database import get_db
+from . import models, schemas, auth
+
+router = APIRouter()
+
+@router.post("/", response_model=schemas.ChatResponse)
+def create_chat(chat: schemas.ChatCreate, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    # Grab all requested users
+    users = db.query(models.User).filter(models.User.username.in_(chat.member_usernames)).all()
+    if len(users) != len(chat.member_usernames):
+        raise HTTPException(status_code=400, detail="One or more users not found")
+    
+    # Add current_user if not in the list
+    if current_user not in users:
+        users.append(current_user)
+
+    # Create chat
+    new_chat = models.Chat(name=chat.name, is_group=chat.is_group)
+    db.add(new_chat)
+    db.commit()
+    db.refresh(new_chat)
+
+    # Add members
+    for u in users:
+        member = models.ChatMember(chat_id=new_chat.id, user_id=u.id)
+        db.add(member)
+    db.commit()
+    
+    db.refresh(new_chat)
+    
+    return {
+        "id": new_chat.id,
+        "name": new_chat.name,
+        "is_group": new_chat.is_group,
+        "created_at": new_chat.created_at,
+        "members": [{"id": m.user.id, "username": m.user.username} for m in new_chat.members]
+    }
+
+@router.get("/me", response_model=List[schemas.ChatResponse])
+def get_my_chats(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    chat_members = db.query(models.ChatMember).filter(models.ChatMember.user_id == current_user.id).all()
+    chat_ids = [m.chat_id for m in chat_members]
+    
+    chats = db.query(models.Chat).filter(models.Chat.id.in_(chat_ids)).order_by(models.Chat.created_at.desc()).all()
+    
+    result = []
+    for c in chats:
+        result.append({
+            "id": c.id,
+            "name": c.name,
+            "is_group": c.is_group,
+            "created_at": c.created_at,
+            "members": [{"id": m.user.id, "username": m.user.username} for m in c.members]
+        })
+    return result
+
+@router.get("/{chat_id}/messages", response_model=List[schemas.MessageResponse])
+def get_chat_messages(chat_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    member = db.query(models.ChatMember).filter(models.ChatMember.chat_id == chat_id, models.ChatMember.user_id == current_user.id).first()
+    if not member:
+        raise HTTPException(status_code=403, detail="Not a member of this chat")
+        
+    messages = db.query(models.Message).filter(models.Message.chat_id == chat_id).order_by(models.Message.timestamp.asc()).all()
+    
+    return [{
+        "id": m.id,
+        "chat_id": m.chat_id,
+        "sender_id": m.sender_id,
+        "text": m.text,
+        "timestamp": m.timestamp,
+        "sender_username": m.sender.username
+    } for m in messages]
+
+@router.post("/{chat_id}/members")
+def add_member(chat_id: int, req: schemas.MemberActionRequest, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    member = db.query(models.ChatMember).filter(models.ChatMember.chat_id == chat_id, models.ChatMember.user_id == current_user.id).first()
+    if not member:
+        raise HTTPException(status_code=403, detail="Not a member")
+        
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    if not chat or not chat.is_group:
+        raise HTTPException(status_code=400, detail="Not a group chat")
+        
+    target_user = db.query(models.User).filter(models.User.username == req.username).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    existing = db.query(models.ChatMember).filter(models.ChatMember.chat_id == chat_id, models.ChatMember.user_id == target_user.id).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Already a member")
+        
+    new_member = models.ChatMember(chat_id=chat_id, user_id=target_user.id)
+    db.add(new_member)
+    db.commit()
+    return {"status": "added"}
+
+@router.delete("/{chat_id}/members/{username}")
+def remove_member(chat_id: int, username: str, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    member = db.query(models.ChatMember).filter(models.ChatMember.chat_id == chat_id, models.ChatMember.user_id == current_user.id).first()
+    if not member:
+        raise HTTPException(status_code=403, detail="Not a member")
+        
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    if not chat or not chat.is_group:
+        raise HTTPException(status_code=400, detail="Not a group chat")
+        
+    target_user = db.query(models.User).filter(models.User.username == username).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    target_member = db.query(models.ChatMember).filter(models.ChatMember.chat_id == chat_id, models.ChatMember.user_id == target_user.id).first()
+    if target_member:
+        db.delete(target_member)
+        db.commit()
+    return {"status": "removed"}
+
+@router.delete("/{chat_id}")
+def delete_chat(chat_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    # Verify membership
+    member = db.query(models.ChatMember).filter(models.ChatMember.chat_id == chat_id, models.ChatMember.user_id == current_user.id).first()
+    if not member:
+        raise HTTPException(status_code=403, detail="Not a member of this chat")
+        
+    chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+        
+    # Delete all members and messages (Cascade usually handles docs, but explicit is safer here)
+    db.query(models.ChatMember).filter(models.ChatMember.chat_id == chat_id).delete()
+    db.query(models.Message).filter(models.Message.chat_id == chat_id).delete()
+    
+    # Delete chat
+    db.delete(chat)
+    db.commit()
+    return {"status": "deleted"}

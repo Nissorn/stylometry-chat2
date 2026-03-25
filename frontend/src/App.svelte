@@ -1,5 +1,92 @@
 <script>
   import { onMount } from 'svelte';
+  import Sidebar from './Sidebar.svelte';
+  import { selectedChatId } from './store.js';
+  import { chats } from './store.js';
+
+  $: activeChat = $chats.find(c => c.id === $selectedChatId);
+  let showMemberModal = false;
+  let newMemberUsername = "";
+
+  
+  async function leaveChat() {
+    if(!confirm('Are you sure you want to leave this group?')) return;
+    try {
+      const res = await fetch(`${API_BASE}/chats/${$selectedChatId}/members/${currentUser}`, {
+        method: "DELETE",
+        headers: { "Authorization": `Bearer ${token}` }
+      });
+      if (res.ok) {
+        selectedChatId.set(null);
+        const chatsRes = await fetch(`${API_BASE}/chats/me`, { headers: { "Authorization": `Bearer ${token}` } });
+        if(chatsRes.ok) chats.set(await chatsRes.json());
+      }
+    } catch(e) {}
+  }
+
+  async function deleteChat() {
+    if(!confirm('Delete this entire chat room for everyone?')) return;
+    try {
+      const res = await fetch(`${API_BASE}/chats/${$selectedChatId}`, {
+        method: "DELETE",
+        headers: { "Authorization": `Bearer ${token}` }
+      });
+      if (res.ok) {
+        selectedChatId.set(null);
+        const chatsRes = await fetch(`${API_BASE}/chats/me`, { headers: { "Authorization": `Bearer ${token}` } });
+        if(chatsRes.ok) chats.set(await chatsRes.json());
+      }
+    } catch(e) {}
+  }
+
+  async function addGroupMember() {
+    if (!newMemberUsername.trim()) return;
+    try {
+      const res = await fetch(`${API_BASE}/chats/${$selectedChatId}/members`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({ username: newMemberUsername.trim() })
+      });
+      if (res.ok) {
+        newMemberUsername = "";
+        const chatsRes = await fetch(`${API_BASE}/chats/me`, { headers: { "Authorization": `Bearer ${token}` } });
+        if(chatsRes.ok) chats.set(await chatsRes.json());
+      } else {
+        const data = await res.json();
+        alert(data.detail || "Error adding member");
+      }
+    } catch(e) {}
+  }
+
+  async function removeGroupMember(username) {
+    if(!confirm(`Remove ${username} from group?`)) return;
+    try {
+      const res = await fetch(`${API_BASE}/chats/${$selectedChatId}/members/${username}`, {
+        method: "DELETE",
+        headers: { "Authorization": `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const chatsRes = await fetch(`${API_BASE}/chats/me`, { headers: { "Authorization": `Bearer ${token}` } });
+        if(chatsRes.ok) {
+            let data = await chatsRes.json();
+            chats.set(data);
+            // Check if kicked
+            let stillIn = data.find(c => c.id === $selectedChatId);
+            if (!stillIn) {
+                selectedChatId.set(null);
+                showMemberModal = false;
+            }
+        }
+      } else {
+        const data = await res.json();
+        alert(data.detail || "Error removing member");
+      }
+    } catch(e) {}
+  }
+
 
   let isLogin = true;
   let username = "";
@@ -45,12 +132,40 @@
     }
   });
 
-  $: if (isAuthenticated && !ws) {
-    connectWebSocket();
+  let currentWsId = null;
+  $: if (isAuthenticated && $selectedChatId && $selectedChatId !== currentWsId) {
+    if (ws) {
+      ws.close();
+      ws = null;
+    }
+    messages = [];
+    trustScore = 100.0;
+    fetchChatHistory($selectedChatId);
+    connectWebSocket($selectedChatId);
+    currentWsId = $selectedChatId;
   }
 
-  function connectWebSocket() {
-    const wsUrl = `ws://localhost:8000/ws/chat?token=${token}`;
+  async function fetchChatHistory(chatId) {
+    if (!chatId) return;
+    try {
+      const res = await fetch(`${API_BASE}/chats/${chatId}/messages`, {
+         headers: { "Authorization": `Bearer ${token}` }
+      });
+      if (res.ok) {
+         const rawMessages = await res.json();
+         messages = rawMessages.map(m => ({ 
+             sender: m.sender_username, 
+             text: m.text, 
+             timestamp: m.timestamp 
+         }));
+         scrollToBottom();
+      }
+    } catch(e) {}
+  }
+
+  function connectWebSocket(chatId) {
+    if (!chatId) return;
+    const wsUrl = `ws://localhost:8000/ws/chat/${chatId}?token=${token}`;
     ws = new WebSocket(wsUrl);
 
     ws.onmessage = (event) => {
@@ -59,20 +174,25 @@
         // Broadcast format: {type:"chat", sender:username, message:text, is_broadcast:true}
         // Legacy echo format: {type:"chat", sender:"me"/"bot", text:...}
         const text = data.is_broadcast ? data.message : (data.text || data.message || "");
-        messages = [...messages, { sender: data.sender, text }];
+        messages = [...messages, { sender: data.sender, text, timestamp: new Date().toISOString() }];
         scrollToBottom();
       } else if (data.type === "trust_update") {
         trustScore = data.trust_score;
       } else if (data.sender && (data.text || data.message)) { // fallback
         const text = data.message || data.text;
-        messages = [...messages, { sender: data.sender, text }];
+        messages = [...messages, { sender: data.sender, text, timestamp: new Date().toISOString() }];
         scrollToBottom();
       }
     };
 
-    ws.onclose = (event) => {
+    const thisWs = ws;
+    thisWs.onclose = (event) => {
       console.log("WebSocket Disconnected", event.code);
-      ws = null;
+      // Only set ws to null if the active global ws is still THIS socket.
+      // This prevents race conditions when switching chats rapidly.
+      if (ws === thisWs) {
+        ws = null;
+      }
       if (event.code === 4001) {
         forceLockout();
       }
@@ -121,6 +241,8 @@
       sendChatMessage();
     }
   }
+
+    $: messages, scrollToBottom();
 
   function scrollToBottom() {
     setTimeout(() => {
@@ -394,12 +516,53 @@
     </div>
     
     <div class="flex-1 flex flex-col lg:flex-row gap-6 p-6 overflow-hidden">
+      <Sidebar {token} />
+      
       <!-- Main Dashboard Chat Interface -->
       <div class="flex-1 flex flex-col bg-base-100 shadow-xl rounded-box overflow-hidden h-full">
-        <div class="bg-base-200 p-4 font-bold border-b border-base-300">
-          Tester Bot Chamber
+        <div class="bg-base-200 p-4 border-b border-base-300 flex justify-between items-center z-10 shadow-sm">
+          <div class="font-bold text-lg flex items-center gap-2">
+            {#if activeChat}
+              {activeChat.name || `Room #${activeChat.id}`}
+              {#if activeChat.is_group}
+                <span class="badge badge-accent badge-sm font-semibold">{activeChat.members?.length || 0} Members</span>
+              {/if}
+            {:else}
+              Select a Chat
+            {/if}
+          </div>
+          <div class="flex items-center gap-1">
+            {#if activeChat && activeChat.is_group}
+              <button class="btn btn-sm btn-circle btn-ghost text-base-content/70 hover:text-primary transition-colors tooltip tooltip-bottom" data-tip="Manage Members" on:click={() => showMemberModal = true}>
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 8.614 8.614 0 00-5.46-1.503M15 19.128a3.001 3.001 0 01-5.714 0m5.714 0a3.002 3.002 0 01-5.714 0M15 19.128a9.38 9.38 0 01-2.625.372 8.614 8.614 0 015.46-1.503M8.25 15.6a9.381 9.381 0 015.714 0m-5.714 0A8.616 8.616 0 0110.875 14m-2.625 1.6a9.381 9.381 0 01-2.625-.372" />
+                </svg>
+              </button>
+            {/if}
+          
+          {#if activeChat}
+            <!-- 3 dots is already implemented -->
+            <div class="dropdown dropdown-end">
+              <label tabindex="0" class="btn btn-sm btn-circle btn-ghost">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="inline-block w-5 h-5 stroke-current"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg>
+              </label>
+              <ul tabindex="0" class="dropdown-content z-[1] menu p-2 shadow bg-base-100 rounded-box w-40 border border-base-200">
+                {#if activeChat.is_group}
+                  <li><button class="text-error font-semibold" on:click={leaveChat}>Leave Group</button></li>
+                {:else}
+                  <li><button class="text-error font-semibold" on:click={deleteChat}>Delete Chat</button></li>
+                {/if}
+              </ul>
+            </div>
+          {/if}
+          </div>
         </div>
         
+        {#if !$selectedChatId}
+          <div class="flex-1 flex items-center justify-center text-base-content/50">
+            Please select a chat room or create a new one from the sidebar.
+          </div>
+        {:else}
         <div class="flex-1 p-4 overflow-y-auto" bind:this={chatContainer}>
           {#if messages.length === 0}
             <div class="text-center text-base-content/50 mt-10">
@@ -409,12 +572,15 @@
           {/if}
           
           {#each messages as msg}
-            <div class="chat {msg.sender === currentUser ? 'chat-end' : 'chat-start'}">
-              <div class="chat-header text-xs opacity-50 mb-1">
-                {msg.sender}
+            <div class="chat {msg.sender === currentUser ? 'chat-end' : 'chat-start'} mb-2">
+              <div class="chat-header text-xs opacity-60 mb-1 font-semibold flex gap-2 items-center">
+                {msg.sender === currentUser ? 'You' : msg.sender}
               </div>
-              <div class="chat-bubble {msg.sender === currentUser ? 'chat-bubble-primary' : 'chat-bubble-secondary'}">
+              <div class="chat-bubble shadow-sm {msg.sender === currentUser ? 'bg-primary text-primary-content' : 'bg-base-200 text-base-content'}">
                 {msg.text}
+              </div>
+              <div class="chat-footer opacity-40 text-[10px] mt-1">
+                {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : ''}
               </div>
             </div>
           {/each}
@@ -430,6 +596,7 @@
           />
           <button class="btn btn-primary" on:click={sendChatMessage}>Send</button>
         </div>
+        {/if}
       </div>
       
       <!-- Security Settings Panel -->
@@ -500,4 +667,40 @@
     </div>
   </div>
   {/if}
+
+  <!-- Manage Members Modal -->
+  {#if showMemberModal && activeChat}
+  <dialog class="modal modal-open">
+    <div class="modal-box rounded-2xl p-0 overflow-hidden border border-base-300 shadow-2xl">
+      <div class="bg-base-200/50 p-6 border-b border-base-300 flex justify-between items-center">
+        <h3 class="font-bold text-xl flex items-center gap-2">
+          Manage Group Members
+        </h3>
+        <button class="btn btn-sm btn-circle btn-ghost" on:click={() => showMemberModal = false}>✕</button>
+      </div>
+      <div class="p-6 bg-base-100">
+        <div class="flex gap-2 mb-6">
+          <input type="text" placeholder="Add Username..." class="input input-bordered w-full focus:input-accent" bind:value={newMemberUsername} on:keydown={(e) => e.key === 'Enter' && addGroupMember()}/>
+          <button class="btn btn-accent px-6" on:click={addGroupMember} disabled={!newMemberUsername.trim()}>Add</button>
+        </div>
+        
+        <div class="text-sm font-semibold mb-2 text-base-content/80">Current Members ({activeChat.members.length})</div>
+        <div class="space-y-2 max-h-60 overflow-y-auto">
+          {#each activeChat.members as member}
+            <div class="flex justify-between items-center bg-base-200/50 p-3 rounded-xl border border-base-200">
+              <span class="font-medium text-[15px] {member.username === currentUser ? 'text-primary' : ''}">{member.username} {member.username === currentUser ? '(You)' : ''}</span>
+              {#if member.username !== currentUser}
+                <button class="btn btn-xs btn-error btn-outline" on:click={() => removeGroupMember(member.username)}>Remove</button>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      </div>
+    </div>
+    <form method="dialog" class="modal-backdrop bg-neutral/60 backdrop-blur-sm" on:click={() => showMemberModal = false}>
+      <button>close</button>
+    </form>
+  </dialog>
+  {/if}
 </main>
+
