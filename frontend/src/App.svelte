@@ -56,12 +56,16 @@
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
       if (data.type === "chat") {
-        messages = [...messages, {sender: data.sender, text: data.text}];
+        // Broadcast format: {type:"chat", sender:username, message:text, is_broadcast:true}
+        // Legacy echo format: {type:"chat", sender:"me"/"bot", text:...}
+        const text = data.is_broadcast ? data.message : (data.text || data.message || "");
+        messages = [...messages, { sender: data.sender, text }];
         scrollToBottom();
       } else if (data.type === "trust_update") {
         trustScore = data.trust_score;
-      } else if (data.sender && data.text) { // fallback
-        messages = [...messages, {sender: data.sender, text: data.text}];
+      } else if (data.sender && (data.text || data.message)) { // fallback
+        const text = data.message || data.text;
+        messages = [...messages, { sender: data.sender, text }];
         scrollToBottom();
       }
     };
@@ -404,11 +408,11 @@
           {/if}
           
           {#each messages as msg}
-            <div class="chat {msg.sender === 'me' ? 'chat-end' : 'chat-start'}">
+            <div class="chat {msg.sender === currentUser ? 'chat-end' : 'chat-start'}">
               <div class="chat-header text-xs opacity-50 mb-1">
-                {msg.sender === 'me' ? currentUser : 'Tester Bot'}
+                {msg.sender}
               </div>
-              <div class="chat-bubble {msg.sender === 'me' ? 'chat-bubble-primary' : 'chat-bubble-secondary'}">
+              <div class="chat-bubble {msg.sender === currentUser ? 'chat-bubble-primary' : 'chat-bubble-secondary'}">
                 {msg.text}
               </div>
             </div>

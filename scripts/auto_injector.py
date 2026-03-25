@@ -40,8 +40,10 @@ async def run_injector(token, file_path, count, security_on):
                                 print("--> [SERVER] Session Locked!")
                                 
                         elif data.get("type") == "chat":
-                            if data.get("sender") == "bot":
-                                print(f"    [ECHO] {data['text']}")
+                            sender = data.get("sender", "?")
+                            # Broadcast format uses 'message'; legacy echo used 'text'
+                            text = data.get("message") or data.get("text", "")
+                            print(f"    [CHAT from {sender}] {text}")
                 except websockets.exceptions.ConnectionClosed as e:
                     print(f"\nConnection Closed! Code: {e.code}, Reason: {e.reason}")
                 except Exception as e:

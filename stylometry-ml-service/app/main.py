@@ -15,6 +15,7 @@ from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier
 
 from app.fusion_models import CharVocab, AttentionSessionCNN, StylometricFeatureExtractor
+from app.crypto import decrypt as fernet_decrypt
 
 UNIVERSAL_BACKGROUND_CORPUS = [
     "การประชุมจะเริ่มในเวลา 10.00 น. ขอให้ทุกคนตรงต่อเวลาด้วยครับ",
@@ -97,12 +98,30 @@ def train_user_model(username: str):
     baseline_path = os.path.join("/ml_workspace/data", f"{username}_baseline.txt")
     if not os.path.exists(baseline_path):
         raise HTTPException(status_code=400, detail="Baseline data not found")
-        
+
     with open(baseline_path, "r", encoding="utf-8") as f:
-        user_texts = [line.strip() for line in f if line.strip()]
-        
+        raw_lines = [line.strip() for line in f if line.strip()]
+
+    # Decrypt each line — supports both new Fernet ciphertext and legacy plain-text files.
+    # If decryption fails (old file, wrong key, corrupted line), fall back to using the
+    # raw string so we never crash training on pre-encryption baseline data.
+    user_texts = []
+    legacy_count = 0
+    for line in raw_lines:
+        plain = fernet_decrypt(line)
+        if plain is not None:
+            user_texts.append(plain)
+        else:
+            # Fallback: treat as legacy plain-text (backward compat)
+            user_texts.append(line)
+            legacy_count += 1
+    if legacy_count > 0:
+        print(f"[WARN] /train/{username}: {legacy_count}/{len(raw_lines)} lines could not be decrypted — "
+              f"treated as legacy plain-text. Consider re-collecting baseline data.")
+
     if len(user_texts) < 20:
         raise HTTPException(status_code=400, detail="Require at least 20 baseline messages.")
+
         
     user_dir = os.path.join(ML_WORKSPACE, username)
     os.makedirs(user_dir, exist_ok=True)
