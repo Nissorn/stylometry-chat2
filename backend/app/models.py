@@ -16,11 +16,26 @@ class User(Base):
 
     # --- Step-up Security ---
     security_enabled = Column(Boolean, default=False)
-    unlock_pin_hash = Column(String, nullable=True)
     is_frozen = Column(Boolean, default=False)
     
     chats = relationship("ChatMember", back_populates="user")
     messages = relationship("Message", back_populates="sender")
+    passkeys = relationship("Passkey", back_populates="user", cascade="all, delete-orphan")
+
+
+class Passkey(Base):
+    __tablename__ = "passkeys"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    user_handle = Column(String, nullable=False, index=True)
+    credential_id = Column(String, unique=True, index=True, nullable=False)
+    public_key = Column(String, nullable=False)
+    sign_count = Column(Integer, nullable=False, default=0)
+    device_name = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="passkeys")
 
 class Chat(Base):
     __tablename__ = "chats"

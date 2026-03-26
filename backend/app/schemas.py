@@ -43,7 +43,6 @@ class UserMeResponse(BaseModel):
     is_totp_enabled: bool = False
     security_enabled: bool = False
     is_frozen: bool = False
-    unlock_pin_hash: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -77,18 +76,6 @@ class MessageResponse(BaseModel):
 
 class MemberActionRequest(BaseModel):
     username: str
-
-
-class EnableSecurityRequest(BaseModel):
-    pin: str = Field(
-        ...,
-        pattern=r"^\d{6}$",
-        description="Exactly 6 numeric digits used as the step-up authentication PIN.",
-    )
-
-
-class VerifyPinRequest(BaseModel):
-    pin: str = Field(..., pattern=r"^\d{6}$")
 
 
 class SuspiciousMessagesResponse(BaseModel):

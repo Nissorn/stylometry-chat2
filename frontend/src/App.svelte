@@ -1,5 +1,6 @@
 <script>
   import { onMount, tick } from 'svelte';
+  import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
   import Sidebar from './Sidebar.svelte';
   import { selectedChatId, chats } from './store.js';
   import { getApiBaseUrl, getWsBaseUrl } from './config.js';
@@ -58,16 +59,13 @@
   let newUsername = "";
   let newPassword = "";
 
-  // ── Security / PIN State ───────────────────────────────────────────────────
+  // ── Security / Passkey State ───────────────────────────────────────────────
   let securityModeEnabled = false;
-  let securitySetupPin = "";
-  let securitySetupConfirmPin = "";
-  let securitySetupError = "";
-  let securitySetupSuccess = false;
-  let totpQR = "";
-
-  let pinInput = "";
-  let pinError = "";
+  let passkeyDeviceName = "";
+  let passkeySetupError = "";
+  let passkeySetupSuccess = false;
+  let stepupError = "";
+  let isPasskeyBusy = false;
   let showReviewStep = false;
   let suspiciousMessages = [];
   let reviewError = "";
@@ -126,6 +124,7 @@
           showReviewStep = false;
           suspiciousMessages = [];
           reviewError = "";
+          stepupError = "";
         }
       }
     } catch (e) {}
@@ -223,6 +222,7 @@
           showReviewStep = false;
           suspiciousMessages = [];
           reviewError = "";
+          stepupError = "";
         } else {
           forceLockout();
         }
@@ -230,27 +230,43 @@
     };
   }
 
-  async function submitPin() {
-    pinError = "Verifying...";
+  async function verifyStepUpWithPasskey() {
+    isPasskeyBusy = true;
+    stepupError = "";
     try {
-      const res = await fetch(`${API_BASE}/auth/verify-pin`, {
+      const optionsRes = await fetch(`${API_BASE}/auth/webauthn/stepup/options`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${token}` }
+      });
+      if (!optionsRes.ok) {
+        const data = await optionsRes.json();
+        stepupError = data.detail || "Unable to start passkey verification";
+        return;
+      }
+
+      const optionsJSON = await optionsRes.json();
+      const credential = await startAuthentication({ optionsJSON });
+
+      const verifyRes = await fetch(`${API_BASE}/auth/webauthn/stepup/verify`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${token}`
         },
-        body: JSON.stringify({ pin: pinInput })
+        body: JSON.stringify({ credential })
       });
-      if (res.ok) {
-        pinError = "";
-        await loadSuspiciousMessages();
-        showReviewStep = true;
-      } else {
-        const data = await res.json();
-        pinError = data.detail || "Invalid PIN";
+      if (!verifyRes.ok) {
+        const data = await verifyRes.json();
+        stepupError = data.detail || "Passkey verification failed";
+        return;
       }
+
+      await loadSuspiciousMessages();
+      showReviewStep = true;
     } catch (e) {
-      pinError = "Connection error";
+      stepupError = e?.message || "Passkey verification canceled or failed";
+    } finally {
+      isPasskeyBusy = false;
     }
   }
 
@@ -296,8 +312,7 @@
       showPinModal = false;
       showReviewStep = false;
       suspiciousMessages = [];
-      pinInput = "";
-      pinError = "";
+      stepupError = "";
       trustScore = 100.0;
       systemAlert = null;
       if ($selectedChatId) connectWebSocket($selectedChatId);
@@ -324,10 +339,27 @@
     showPinModal = false;
     showReviewStep = false;
     suspiciousMessages = [];
-    pinInput = "";
-    pinError = "";
+    stepupError = "";
+    passkeySetupError = "";
+    passkeySetupSuccess = false;
+    isPasskeyBusy = false;
     reviewError = "";
     selectedChatId.set(null);
+  }
+
+  function applyAuthState(authUser, authToken, data) {
+    token = authToken;
+    currentUser = authUser;
+    isTotpEnabled = data.is_totp_enabled === true;
+    securityModeEnabled = data.security_enabled === true;
+
+    localStorage.setItem("token", token);
+    localStorage.setItem("username", currentUser);
+    localStorage.setItem("isTotpEnabled", String(isTotpEnabled));
+    localStorage.setItem("securityModeEnabled", String(securityModeEnabled));
+
+    isAuthenticated = true;
+    checkFrozenStatus();
   }
 
   // ── Chat Actions ───────────────────────────────────────────────────────────
@@ -393,23 +425,54 @@
       });
       const data = await res.json();
       if (res.ok) {
-        token = data.access_token;
-        currentUser = username;
-        isTotpEnabled = data.is_totp_enabled === true;
-        securityModeEnabled = data.security_enabled === true;
-        
-        localStorage.setItem("token", token);
-        localStorage.setItem("username", currentUser);
-        localStorage.setItem("isTotpEnabled", isTotpEnabled);
-        localStorage.setItem("securityModeEnabled", securityModeEnabled);
-        
-        isAuthenticated = true;
-        checkFrozenStatus();
+        applyAuthState(username, data.access_token, data);
       } else {
         errorMessage = data.detail || "Authentication failed";
       }
     } catch (err) {
       errorMessage = "Network error";
+    }
+  }
+
+  async function loginWithPasskey() {
+    errorMessage = "";
+    if (!username.trim()) {
+      errorMessage = "Enter your username to use passkey login";
+      return;
+    }
+
+    try {
+      const optionsRes = await fetch(`${API_BASE}/auth/webauthn/login/options`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username.trim() })
+      });
+      if (!optionsRes.ok) {
+        const data = await optionsRes.json();
+        errorMessage = data.detail || "Unable to start passkey login";
+        return;
+      }
+
+      const optionsJSON = await optionsRes.json();
+      const credential = await startAuthentication({ optionsJSON });
+
+      const verifyRes = await fetch(`${API_BASE}/auth/webauthn/login/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: username.trim(),
+          credential
+        })
+      });
+      const data = await verifyRes.json();
+      if (!verifyRes.ok) {
+        errorMessage = data.detail || "Passkey login failed";
+        return;
+      }
+
+      applyAuthState(username.trim(), data.access_token, data);
+    } catch (e) {
+      errorMessage = e?.message || "Passkey login canceled or failed";
     }
   }
 
@@ -528,51 +591,49 @@
     }
   }
 
-  async function enableSecurity() {
-    // ... logic for PIN setup ...
-    try {
-      const res = await fetch(`${API_BASE}/auth/security/enable`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
-        body: JSON.stringify({ pin: securitySetupPin })
-      });
-      if (res.ok) {
-        securityModeEnabled = true;
-        localStorage.setItem("securityModeEnabled", "true");
-        securitySetupPin = "";
-      }
-    } catch (e) {}
-  }
+  async function registerPasskey() {
+    passkeySetupError = "";
+    passkeySetupSuccess = false;
+    isPasskeyBusy = true;
 
-  async function enableSecurityMode() {
-    securitySetupError = "";
-    if (securitySetupPin !== securitySetupConfirmPin) {
-      securitySetupError = "PINs do not match";
-      return;
-    }
     try {
-      const res = await fetch(`${API_BASE}/auth/security/enable`, {
+      const optionsRes = await fetch(`${API_BASE}/auth/webauthn/register/options`, {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${token}` }
+      });
+      if (!optionsRes.ok) {
+        const data = await optionsRes.json();
+        passkeySetupError = data.detail || "Unable to start passkey registration";
+        return;
+      }
+
+      const optionsJSON = await optionsRes.json();
+      const credential = await startRegistration({ optionsJSON });
+
+      const verifyRes = await fetch(`${API_BASE}/auth/webauthn/register/verify`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${token}`
         },
-        body: JSON.stringify({ pin: securitySetupPin })
+        body: JSON.stringify({
+          credential,
+          device_name: passkeyDeviceName.trim() || null
+        })
       });
-      if (res.ok) {
+      if (verifyRes.ok) {
         securityModeEnabled = true;
-        securitySetupSuccess = true;
+        passkeySetupSuccess = true;
         localStorage.setItem("securityModeEnabled", "true");
         setTimeout(() => { showSecuritySetupModal = false; }, 1500);
       } else {
-        const data = await res.json();
-        securitySetupError = data.detail || "Failed to enable";
+        const data = await verifyRes.json();
+        passkeySetupError = data.detail || "Passkey registration failed";
       }
     } catch (e) {
-      securitySetupError = "Network error";
+      passkeySetupError = e?.message || "Passkey registration canceled or failed";
+    } finally {
+      isPasskeyBusy = false;
     }
   }
 </script>
@@ -633,7 +694,7 @@
               <input
                 id="totp"
                 type="text"
-                placeholder="6-digit PIN"
+                placeholder="6-digit code"
                 class="input input-bordered focus:input-secondary w-full bg-base-200/50 tracking-[0.5em] font-mono text-center text-lg"
                 bind:value={totpCode}
                 maxlength="6"
@@ -642,6 +703,9 @@
 
             <button type="submit" class="btn btn-primary w-full text-lg shadow-xl hover:shadow-primary/20 mt-4 h-14">
               Sign In
+            </button>
+            <button type="button" class="btn btn-outline w-full h-12" on:click={loginWithPasskey}>
+              Sign In with Passkey
             </button>
           </form>
 
@@ -678,16 +742,16 @@
               <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
                 <path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd" />
               </svg>
-              <span class="hidden sm:inline">PIN Active</span>
-              <span class="sm:hidden">PIN</span>
+              <span class="hidden sm:inline">Passkey Active</span>
+              <span class="sm:hidden">Key</span>
             </div>
           {:else}
             <button class="btn btn-warning btn-xs md:btn-sm btn-outline gap-1 md:gap-2 px-2 md:px-3 whitespace-nowrap" on:click={() => showSecuritySetupModal = true}>
               <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
                 <path fill-rule="evenodd" d="M2.166 4.999A11.954 11.954 0 0010 1.944 11.954 11.954 0 0017.834 5c.11.65.166 1.32.166 2.001 0 5.225-3.34 9.67-8 11.317C5.34 16.67 2 12.225 2 7c0-.682.057-1.35.166-2.001zm11.541 3.708a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
               </svg>
-              <span class="hidden sm:inline">Enable PIN</span>
-              <span class="sm:hidden">PIN</span>
+              <span class="hidden sm:inline">Enable Passkey</span>
+              <span class="sm:hidden">Key</span>
             </button>
           {/if}
         </div>
@@ -843,7 +907,7 @@
     </div>
   {/if}
 
-  <!-- PIN Modal (Full Screen Overlay) -->
+  <!-- Passkey Step-Up Modal (Full Screen Overlay) -->
   {#if showPinModal}
     <div class="fixed inset-0 z-[100] bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
       <div class="card w-11/12 max-w-sm max-h-[90vh] overflow-y-auto bg-base-100 shadow-2xl border-2 border-error dark:bg-gray-900 dark:border-red-500">
@@ -851,25 +915,14 @@
           {#if !showReviewStep}
             <div class="text-6xl mb-4 animate-bounce">🔐</div>
             <h2 class="card-title text-2xl font-bold text-error">Session Frozen</h2>
-            <p class="text-sm opacity-70 mb-6">Critical typing anomaly detected. Enter your 6-digit PIN to continue.</p>
+            <p class="text-sm opacity-70 mb-6">Critical typing anomaly detected. Verify with your passkey to continue.</p>
 
-            <div class="form-control w-full mb-4">
-              <input
-                type="password"
-                class="input input-bordered input-error text-center tracking-[1em] text-2xl font-bold dark:bg-gray-800 dark:text-gray-100 dark:border-red-500"
-                maxlength="6"
-                placeholder="••••••"
-                bind:value={pinInput}
-                on:keydown={e => e.key === 'Enter' && submitPin()}
-              />
-            </div>
-
-            {#if pinError}
-              <p class="text-error text-sm font-bold mb-4">{pinError}</p>
+            {#if stepupError}
+              <p class="text-error text-sm font-bold mb-4">{stepupError}</p>
             {/if}
 
-            <button class="btn btn-error w-full text-white font-bold" on:click={submitPin} disabled={pinInput.length !== 6}>
-              Verify PIN
+            <button class="btn btn-error w-full text-white font-bold" on:click={verifyStepUpWithPasskey} disabled={isPasskeyBusy}>
+              {isPasskeyBusy ? 'Opening Passkey...' : 'Use Passkey'}
             </button>
           {:else}
             <h2 class="card-title text-xl font-bold">Review Suspicious Messages</h2>
@@ -1047,7 +1100,7 @@
             {/if}
           </section>
 
-          <!-- Step-Up PIN Section -->
+          <!-- Step-Up Passkey Section -->
           <section>
             <div class="flex items-center gap-3 mb-4">
               <div class="w-8 h-8 rounded-lg bg-warning/20 flex items-center justify-center text-warning">
@@ -1062,27 +1115,32 @@
               {#if securityModeEnabled}
                 <div class="flex items-center justify-between">
                   <div>
-                    <p class="font-bold text-base mb-1">Protection PIN Active</p>
-                    <p class="text-xs opacity-60">Session unfreezing is protected by your 6-digit code.</p>
+                    <p class="font-bold text-base mb-1">Protection Passkey Active</p>
+                    <p class="text-xs opacity-60">Session unfreezing now requires a standard WebAuthn assertion.</p>
                   </div>
                   <div class="badge badge-success py-4 px-4 font-bold">ACTIVE</div>
                 </div>
               {:else}
                 <div class="form-control mb-4">
-                  <label class="label pb-1" for="security-pin">
-                    <span class="label-text font-bold text-xs uppercase opacity-70">Register 6-Digit PIN</span>
+                  <label class="label pb-1" for="passkey-device-name">
+                    <span class="label-text font-bold text-xs uppercase opacity-70">Device Name (Optional)</span>
                   </label>
                   <input
-                    id="security-pin"
-                    type="password"
-                    placeholder="Enter 6-digit PIN"
-                    maxlength="6"
-                    class="input input-bordered focus:input-warning w-full tracking-[1em] font-mono text-center dark:bg-gray-900 dark:text-gray-100 dark:border-gray-700"
-                    bind:value={securitySetupPin}
+                    id="passkey-device-name"
+                    type="text"
+                    placeholder="e.g. MacBook Touch ID"
+                    class="input input-bordered focus:input-warning w-full dark:bg-gray-900 dark:text-gray-100 dark:border-gray-700"
+                    bind:value={passkeyDeviceName}
                   />
                 </div>
-                <button class="btn btn-warning btn-block shadow-lg" on:click={enableSecurity}>
-                  Complete Security Registration
+                {#if passkeySetupError}
+                  <p class="text-error text-sm font-bold mb-3">{passkeySetupError}</p>
+                {/if}
+                {#if passkeySetupSuccess}
+                  <p class="text-success text-sm font-bold mb-3">Passkey registered successfully.</p>
+                {/if}
+                <button class="btn btn-warning btn-block shadow-lg" on:click={registerPasskey} disabled={isPasskeyBusy}>
+                  {isPasskeyBusy ? 'Opening Passkey...' : 'Register Passkey'}
                 </button>
               {/if}
             </div>
@@ -1097,6 +1155,8 @@
             totpSecretText = "";
             setupTotpCode = "";
             totpVerifyError = "";
+            passkeySetupError = "";
+            passkeySetupSuccess = false;
           }}>Done</button>
         </div>
       </div>

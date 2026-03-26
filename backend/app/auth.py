@@ -109,12 +109,21 @@ def login(req: schemas.LoginRequest, db: Session = Depends(database.get_db)):
         if not totp.verify(req.totp_code):
             raise HTTPException(status_code=401, detail="Invalid TOTP code")
 
+    has_passkey = (
+        db.query(models.Passkey)
+        .filter(models.Passkey.user_id == user.id)
+        .first()
+        is not None
+    )
+    user.security_enabled = has_passkey
+    db.commit()
+
     access_token = create_access_token(data={"sub": user.username})
     return {
         "access_token": access_token,
         "token_type": "bearer",
         "is_totp_enabled": user.is_totp_enabled,
-        "security_enabled": user.security_enabled,
+        "security_enabled": has_passkey,
     }
 
 @router.get("/me", response_model=schemas.UserMeResponse)
@@ -170,41 +179,6 @@ def verify_totp(
         "token_type": "bearer",
         "is_totp_enabled": True,
         "security_enabled": user.security_enabled,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Step-Up Security — PIN registration & Verification
-# ---------------------------------------------------------------------------
-
-
-@router.post("/security/enable")
-def enable_security(
-    req: schemas.EnableSecurityRequest,
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(database.get_db),
-):
-    current_user.unlock_pin_hash = pwd_context.hash(req.pin)
-    current_user.security_enabled = True
-    db.commit()
-    return {"detail": "Security mode enabled."}
-
-
-@router.post("/verify-pin")
-def verify_pin(
-    req: schemas.VerifyPinRequest,
-    current_user: models.User = Depends(get_current_user),
-    db: Session = Depends(database.get_db),
-):
-    if not current_user.unlock_pin_hash or not verify_password(
-        req.pin, current_user.unlock_pin_hash
-    ):
-        raise HTTPException(status_code=400, detail="Incorrect PIN")
-
-    pending = manager.get_pending_messages(current_user.username)
-    return {
-        "detail": "PIN verified. Please review suspicious messages.",
-        "requires_review": len(pending) > 0,
     }
 
 
