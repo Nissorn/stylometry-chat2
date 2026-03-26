@@ -1,2 +1,5 @@
+# Auto-Injector runtime dependencies
+# ------------------------------------
+# Third-party packages (install via: pip install -r requirements.txt)
 websockets==15.0.1
 httpx>=0.27.0

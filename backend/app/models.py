@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from datetime import datetime
 from .database import Base
 
+
 class User(Base):
     __tablename__ = "users"
 
@@ -12,6 +13,8 @@ class User(Base):
     totp_secret = Column(String, nullable=True)
     is_totp_enabled = Column(Boolean, default=False)
     security_enabled = Column(Boolean, default=True)
+    unlock_pin_hash = Column(String, nullable=True)
+    is_frozen = Column(Boolean, default=False)
     
     chats = relationship("ChatMember", back_populates="user")
     messages = relationship("Message", back_populates="sender")

@@ -1,44 +1,225 @@
 <script>
   import { onMount, tick } from 'svelte';
   import Sidebar from './Sidebar.svelte';
-  import { selectedChatId } from './store.js';
-  import { chats } from './store.js';
+  import { selectedChatId, chats } from './store.js';
 
+  // ── API/WS Config ──────────────────────────────────────────────────────────
+  const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+  const WS_BASE  = import.meta.env.VITE_WS_BASE  || "ws://localhost:8000";
+
+  // ── Auth State ─────────────────────────────────────────────────────────────
+  let isAuthenticated = false;
+  let currentUser = "";
+  let token = "";
+  let isLogin = true;
+  let username = "";
+  let password = "";
+  let totpCode = "";
+  let isTotpEnabled = false;
+  let errorMessage = "";
+  let successMessage = "";
+
+  // ── TOTP Setup State ───────────────────────────────────────────────────────
+  let isSettingUpTOTP = false;
+  let qrCodeBase64 = "";
+  let totpSecretText = "";
+  let setupTotpCode = "";
+
+  // ── Chat State ─────────────────────────────────────────────────────────────
   $: activeChat = $chats.find(c => c.id === $selectedChatId);
+  let messages = [];
+  let chatInput = "";
+  let ws = null;
+  let chatContainer;
+  let isLoadingHistory = false;
+  let trustScore = 100.0;
+  let securityEnforcement = true;
+  let showDebug = false;
+  let currentWsId = null;
+
+  // ── Group Management ───────────────────────────────────────────────────────
   let showMemberModal = false;
   let newMemberUsername = "";
 
+  // ── Security / PIN State ───────────────────────────────────────────────────
+  let securityModeEnabled = false;
+  let showSecuritySetupModal = false;
+  let securitySetupPin = "";
+  let securitySetupConfirmPin = "";
+  let securitySetupError = "";
+  let securitySetupSuccess = false;
 
-  async function leaveChat() {
-    if(!confirm('Are you sure you want to leave this group?')) return;
+  let showPinModal = false;
+  let pinInput = "";
+  let pinError = "";
+  let systemAlert = null;
+
+  // ── Lifecycle ──────────────────────────────────────────────────────────────
+  onMount(() => {
+    const storedToken = localStorage.getItem("token");
+    const storedUser  = localStorage.getItem("username");
+    if (storedToken && storedUser) {
+      token               = storedToken;
+      currentUser         = storedUser;
+      isTotpEnabled       = localStorage.getItem("isTotpEnabled")       === "true";
+      securityModeEnabled = localStorage.getItem("securityModeEnabled") === "true";
+      isAuthenticated     = true;
+      checkFrozenStatus();
+    }
+  });
+
+  // ── WebSocket Connectivity ─────────────────────────────────────────────────
+  $: if (isAuthenticated && $selectedChatId && $selectedChatId !== currentWsId) {
+    if (ws) {
+      ws.close();
+      ws = null;
+    }
+    messages = [];
+    fetchChatHistory($selectedChatId);
+    connectWebSocket($selectedChatId);
+    currentWsId = $selectedChatId;
+  }
+
+  async function checkFrozenStatus() {
     try {
-      const res = await fetch(`${API_BASE}/chats/${$selectedChatId}/members/${currentUser}`, {
-        method: "DELETE",
+      const res = await fetch(`${API_BASE}/auth/me`, {
         headers: { "Authorization": `Bearer ${token}` }
       });
       if (res.ok) {
-        selectedChatId.set(null);
-        const chatsRes = await fetch(`${API_BASE}/chats/me`, { headers: { "Authorization": `Bearer ${token}` } });
-        if(chatsRes.ok) chats.set(await chatsRes.json());
+        const data = await res.json();
+        if (data.is_frozen) {
+          showPinModal = true;
+        }
       }
-    } catch(e) {}
+    } catch (e) {}
   }
 
-  async function deleteChat() {
-    if(!confirm('Delete this entire chat room for everyone?')) return;
+  async function fetchChatHistory(chatId) {
+    if (!chatId) return;
+    isLoadingHistory = true;
     try {
-      const res = await fetch(`${API_BASE}/chats/${$selectedChatId}`, {
-        method: "DELETE",
+      const res = await fetch(`${API_BASE}/chats/${chatId}/messages`, {
         headers: { "Authorization": `Bearer ${token}` }
       });
       if (res.ok) {
-        selectedChatId.set(null);
-        const chatsRes = await fetch(`${API_BASE}/chats/me`, { headers: { "Authorization": `Bearer ${token}` } });
-        if(chatsRes.ok) chats.set(await chatsRes.json());
+        const raw = await res.json();
+        messages = raw.map(m => ({
+          sender: m.sender_username,
+          text: m.text,
+          timestamp: m.timestamp
+        }));
+        scrollToBottom();
       }
-    } catch(e) {}
+    } catch (e) {
+      console.error("[History] Error:", e);
+    } finally {
+      isLoadingHistory = false;
+    }
   }
 
+  function connectWebSocket(chatId) {
+    if (!chatId || ws) return;
+    const wsUrl = `${WS_BASE}/ws/chat/${chatId}?token=${token}`;
+    ws = new WebSocket(wsUrl);
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === "chat") {
+        const text = data.is_broadcast ? data.message : (data.text || "");
+        messages = [...messages, { 
+          sender: data.sender, 
+          text, 
+          timestamp: new Date().toISOString() 
+        }];
+        scrollToBottom();
+      } else if (data.type === "trust_update") {
+        trustScore = data.trust_score;
+      } else if (data.type === "group_updated") {
+        chats.update(list =>
+          list.map(c => c.id === data.chat_id ? { ...c, members: data.members } : c)
+        );
+        if (data.kicked_user === currentUser && data.chat_id === chatId) {
+          ws.close();
+          selectedChatId.set(null);
+        }
+      } else if (data.type === "system_alert") {
+        systemAlert = data.clear ? null : { message: data.message };
+      }
+    };
+
+    ws.onclose = (event) => {
+      console.log("[WS] Closed code:", event.code);
+      ws = null;
+      if (event.code === 4001) {
+        if (securityModeEnabled) {
+          showPinModal = true;
+        } else {
+          forceLockout();
+        }
+      }
+    };
+  }
+
+  async function submitPin() {
+    pinError = "Verifying...";
+    try {
+      const res = await fetch(`${API_BASE}/auth/verify-pin`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({ pin: pinInput })
+      });
+      if (res.ok) {
+        showPinModal = false;
+        pinInput = "";
+        pinError = "";
+        trustScore = 100.0;
+        systemAlert = null;
+        if ($selectedChatId) connectWebSocket($selectedChatId);
+      } else {
+        const data = await res.json();
+        pinError = data.detail || "Invalid PIN";
+      }
+    } catch (e) {
+      pinError = "Connection error";
+    }
+  }
+
+  function forceLockout() {
+    logout();
+    errorMessage = "Session locked due to unusual behavior. Please login again.";
+  }
+
+  function logout() {
+    localStorage.clear();
+    isAuthenticated = false;
+    currentUser = "";
+    token = "";
+    if (ws) ws.close();
+    ws = null;
+    messages = [];
+    selectedChatId.set(null);
+  }
+
+  // ── Chat Actions ───────────────────────────────────────────────────────────
+  function sendChatMessage() {
+    if (ws && chatInput.trim() !== "") {
+      ws.send(JSON.stringify({
+        message: chatInput.trim(),
+        enforce_security: securityEnforcement
+      }));
+      chatInput = "";
+    }
+  }
+
+  async function scrollToBottom() {
+    await tick();
+    if (chatContainer) chatContainer.scrollTop = chatContainer.scrollHeight;
+  }
+
+  // ── Group Actions ──────────────────────────────────────────────────────────
   async function addGroupMember() {
     if (!newMemberUsername.trim()) return;
     try {
@@ -52,8 +233,7 @@
       });
       if (res.ok) {
         newMemberUsername = "";
-        const chatsRes = await fetch(`${API_BASE}/chats/me`, { headers: { "Authorization": `Bearer ${token}` } });
-        if(chatsRes.ok) chats.set(await chatsRes.json());
+        // Group sync happens via WS "group_updated"
       } else {
         const data = await res.json();
         alert(data.detail || "Error adding member");
@@ -62,694 +242,310 @@
   }
 
   async function removeGroupMember(username) {
-    if(!confirm(`Remove ${username} from group?`)) return;
+    if(!confirm(`Remove ${username}?`)) return;
     try {
-      const res = await fetch(`${API_BASE}/chats/${$selectedChatId}/members/${username}`, {
+      await fetch(`${API_BASE}/chats/${$selectedChatId}/members/${username}`, {
         method: "DELETE",
         headers: { "Authorization": `Bearer ${token}` }
       });
-      if (res.ok) {
-        const chatsRes = await fetch(`${API_BASE}/chats/me`, { headers: { "Authorization": `Bearer ${token}` } });
-        if(chatsRes.ok) {
-            let data = await chatsRes.json();
-            chats.set(data);
-            // Check if kicked
-            let stillIn = data.find(c => c.id === $selectedChatId);
-            if (!stillIn) {
-                selectedChatId.set(null);
-                showMemberModal = false;
-            }
-        }
-      } else {
-        const data = await res.json();
-        alert(data.detail || "Error removing member");
-      }
     } catch(e) {}
   }
 
-
-  let isLogin = true;
-  let username = "";
-  let password = "";
-  let totpCode = ""; // Optional 2FA for login
-  let errorMessage = "";
-  let successMessage = "";
-
-  // State
-  let isAuthenticated = false;
-  let currentUser = "";
-  let token = "";
-  let isTotpEnabled = false;
-
-  // TOTP Dashboard State
-  let qrCodeBase64 = "";
-  let totpSecretText = "";
-  let setupTotpCode = "";
-  let isSettingUpTOTP = false;
-
-  // Real-time Chat State
-  let messages = [];
-  let chatInput = "";
-  let ws = null;
-  let chatContainer;
-  let isLoadingHistory = false;
-
-  // Trust State
-  let trustScore = 100.0;
-  let showDebug = false;
-  let securityEnforcement = true;
-
-  // API and WebSocket base URLs — configurable via Vite environment variables.
-  // Set VITE_API_BASE and VITE_WS_BASE in your .env file or Docker Compose
-  // environment for production deployments (e.g. http://your-droplet-ip:8000).
-  const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
-  const WS_BASE  = import.meta.env.VITE_WS_BASE  || "ws://localhost:8000";
-
-  onMount(() => {
-    const storedToken = localStorage.getItem("token");
-    const storedUser = localStorage.getItem("username");
-    const storedTotp = localStorage.getItem("isTotpEnabled");
-    if (storedToken && storedUser) {
-      token = storedToken;
-      currentUser = storedUser;
-      if (storedTotp === "true") isTotpEnabled = true;
-      isAuthenticated = true;
-    }
-  });
-
-  let currentWsId = null;
-  $: if (isAuthenticated && $selectedChatId && $selectedChatId !== currentWsId) {
-    if (ws) {
-      ws.close();
-      ws = null;
-    }
-    messages = [];
-    fetchChatHistory($selectedChatId);
-    connectWebSocket($selectedChatId);
-    currentWsId = $selectedChatId;
-  }
-
-  async function fetchChatHistory(chatId) {
-    if (!chatId) return;
-    isLoadingHistory = true;
-    try {
-      const res = await fetch(`${API_BASE}/chats/${chatId}/messages`, {
-        headers: { "Authorization": `Bearer ${token}` }
-      });
-      if (res.ok) {
-        const rawMessages = await res.json();
-        // Backend guarantees ascending timestamp order — map directly to render format.
-        messages = rawMessages.map(m => ({
-          sender: m.sender_username,
-          text: m.text,
-          timestamp: m.timestamp
-        }));
-        scrollToBottom();
-      } else {
-        console.error(`[History] Fetch failed: HTTP ${res.status}`);
-        messages = [];
-      }
-    } catch (e) {
-      console.error("[History] Network error:", e);
-      messages = [];
-    } finally {
-      isLoadingHistory = false;
-    }
-  }
-
-  function connectWebSocket(chatId) {
-    if (!chatId) return;
-    const wsUrl = `${WS_BASE}/ws/chat/${chatId}?token=${token}`;
-    ws = new WebSocket(wsUrl);
-
-    ws.onmessage = (event) => {
-      let data;
-      try {
-        data = JSON.parse(event.data);
-      } catch {
-        console.warn("[WS] Non-JSON message received:", event.data);
-        return;
-      }
-
-      if (data.type === "chat") {
-        // Broadcast: { type:"chat", sender, message, is_broadcast:true }
-        // Legacy echo: { type:"chat", sender, text }
-        const text = data.is_broadcast ? data.message : (data.text || data.message || "");
-        messages = [...messages, { sender: data.sender, text, timestamp: new Date().toISOString() }];
-        scrollToBottom();
-
-      } else if (data.type === "trust_update") {
-        trustScore = data.trust_score;
-
-      } else if (data.type === "group_updated") {
-        // ── Bug Fix: Reactive Group Sync ──────────────────────────────────
-        // Server broadcasts this after every add_member / remove_member REST
-        // call. Update the chats store in-place so the member badge, the
-        // manage-members modal, and the activeChat derived value all re-render
-        // without a page reload.
-        const updatedId = data.chat_id;
-        const updatedMembers = data.members || [];
-        chats.update(list =>
-          list.map(c => c.id === updatedId ? { ...c, members: updatedMembers } : c)
-        );
-
-        // If the current user was just kicked from THIS room, close gracefully
-        // and navigate back to the chat list.
-        if (data.kicked_user && data.kicked_user === currentUser && updatedId === chatId) {
-          console.warn("[WS] You were removed from this group.");
-          if (ws) { ws.close(); ws = null; }
-          selectedChatId.set(null);
-        }
-
-      } else if (data.sender && (data.text || data.message)) {
-        // Fallback for legacy server messages
-        const text = data.message || data.text;
-        messages = [...messages, { sender: data.sender, text, timestamp: new Date().toISOString() }];
-        scrollToBottom();
-      }
-    };
-
-    const thisWs = ws;
-    thisWs.onclose = (event) => {
-      console.log("[WS] Disconnected. Code:", event.code);
-      // Guard against race conditions when the user switches chats rapidly.
-      if (ws === thisWs) {
-        ws = null;
-      }
-      if (event.code === 4001) {
-        forceLockout();
-      }
-    };
-
-    thisWs.onerror = (event) => {
-      console.error("[WS] Socket error:", event);
-    };
-  }
-
-  function forceLockout() {
-    localStorage.removeItem("token");
-    localStorage.removeItem("username");
-    localStorage.removeItem("isTotpEnabled");
-    isAuthenticated = false;
-    currentUser = "";
-    token = "";
-    isTotpEnabled = false;
-    isSettingUpTOTP = false;
-    qrCodeBase64 = "";
-    totpSecretText = "";
-    setupTotpCode = "";
-    messages = [];
-    trustScore = 100.0;
-
-    if (ws) {
-      ws.close();
-      ws = null;
-    }
-
-    isLogin = true;
-    errorMessage = "Session locked due to unusual typing behavior. Please re-authenticate.";
-    successMessage = "";
-  }
-
-  function sendChatMessage() {
-    if (ws && chatInput.trim() !== "") {
-      const payload = {
-        message: chatInput.trim(),
-        enforce_security: securityEnforcement
-      };
-      console.log("DEBUG: Sending payload:", payload);
-      ws.send(JSON.stringify(payload));
-      chatInput = "";
-    }
-  }
-
-  function handleChatKeydown(event) {
-    if (event.key === 'Enter') {
-      sendChatMessage();
-    }
-  }
-
-    $: messages, scrollToBottom();
-
-  async function scrollToBottom() {
-    await tick(); // flush Svelte DOM updates before measuring scroll height
-    if (chatContainer) {
-      chatContainer.scrollTop = chatContainer.scrollHeight;
-    }
-  }
-
-  function toggleMode() {
-    isLogin = !isLogin;
-    username = "";
-    password = "";
-    totpCode = "";
+  // ── Auth Actions ───────────────────────────────────────────────────────────
+  async function handleSubmit(e) {
+    e.preventDefault();
     errorMessage = "";
-    successMessage = "";
-  }
-
-  function logout() {
-    localStorage.removeItem("token");
-    localStorage.removeItem("username");
-    localStorage.removeItem("isTotpEnabled");
-    isAuthenticated = false;
-    currentUser = "";
-    token = "";
-    isTotpEnabled = false;
-    isSettingUpTOTP = false;
-    qrCodeBase64 = "";
-    totpSecretText = "";
-    setupTotpCode = "";
-    errorMessage = "";
-    successMessage = "";
-    trustScore = 100.0;
-
-    if (ws) {
-      ws.close();
-      ws = null;
-    }
-    messages = [];
-  }
-
-  async function handleSubmit(event) {
-    event.preventDefault();
-    errorMessage = "";
-    successMessage = "";
-
     const endpoint = isLogin ? "/auth/login" : "/auth/register";
-    const payload = { username, password };
-    if (isLogin && totpCode) payload.totp_code = totpCode;
-
     try {
-      const response = await fetch(`${API_BASE}${endpoint}`, {
+      const res = await fetch(`${API_BASE}${endpoint}`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(payload)
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password, totp_code: totpCode })
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        // FastAPI returns detail as Array of objects (422) or String (400)
-        errorMessage = Array.isArray(data.detail) ? data.detail[0].msg : (data.detail || "Authentication failed");
-        return;
-      }
-
-      // Store on success
-      token = data.access_token;
-      currentUser = username;
-      isTotpEnabled = data.is_totp_enabled || false;
-
-      localStorage.setItem("token", token);
-      localStorage.setItem("username", currentUser);
-      localStorage.setItem("isTotpEnabled", isTotpEnabled.toString());
-      isAuthenticated = true;
-
-    } catch (error) {
-      errorMessage = "Network error. Please try again.";
-    }
-  }
-
-  async function generateTOTP() {
-    errorMessage = "";
-    successMessage = "";
-    isSettingUpTOTP = true;
-
-    try {
-      const response = await fetch(`${API_BASE}/auth/totp/generate?username=${encodeURIComponent(currentUser)}`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${token}`
-        }
-      });
-      const data = await response.json();
-
-      if (response.ok) {
-        qrCodeBase64 = data.qr_code;
-        totpSecretText = data.secret;
+      const data = await res.json();
+      if (res.ok) {
+        token = data.access_token;
+        currentUser = username;
+        isTotpEnabled = data.is_totp_enabled === true;
+        securityModeEnabled = data.security_enabled === true;
+        localStorage.setItem("token", token);
+        localStorage.setItem("username", currentUser);
+        localStorage.setItem("isTotpEnabled", isTotpEnabled);
+        localStorage.setItem("securityModeEnabled", securityModeEnabled);
+        isAuthenticated = true;
+        checkFrozenStatus();
       } else {
-        errorMessage = Array.isArray(data.detail) ? data.detail[0].msg : (data.detail || "Failed to generate 2FA");
+        errorMessage = data.detail || "Auth failed";
       }
-    } catch (error) {
-      errorMessage = "Network Error during 2FA generation";
+    } catch (err) {
+      errorMessage = "Network error";
     }
   }
 
-  async function verifyTOTP() {
-    errorMessage = "";
-    successMessage = "";
-
+  async function enableSecurityMode() {
+    securitySetupError = "";
+    if (securitySetupPin !== securitySetupConfirmPin) {
+      securitySetupError = "PINs do not match";
+      return;
+    }
     try {
-      const response = await fetch(`${API_BASE}/auth/totp/verify?username=${encodeURIComponent(currentUser)}`, {
+      const res = await fetch(`${API_BASE}/auth/security/enable`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${token}`
         },
-        body: JSON.stringify({ totp_code: setupTotpCode })
+        body: JSON.stringify({ pin: securitySetupPin })
       });
-
-      const data = await response.json();
-
-      if (response.ok) {
-        successMessage = "2FA Enabled Successfully!";
-        isTotpEnabled = true;
-        localStorage.setItem("isTotpEnabled", "true");
-
-        isSettingUpTOTP = false;
-        qrCodeBase64 = "";
-        totpSecretText = "";
-        setupTotpCode = "";
-
-        // Optionally update token if a new one was issued
-        if (data.access_token) {
-          token = data.access_token;
-          localStorage.setItem("token", token);
-        }
+      if (res.ok) {
+        securityModeEnabled = true;
+        securitySetupSuccess = true;
+        localStorage.setItem("securityModeEnabled", "true");
+        setTimeout(() => { showSecuritySetupModal = false; }, 1500);
       } else {
-        errorMessage = Array.isArray(data.detail) ? data.detail[0].msg : (data.detail || "Invalid 2FA Code");
+        const data = await res.json();
+        securitySetupError = data.detail || "Failed to enable";
       }
-    } catch (error) {
-      errorMessage = "Network Error verifying 2FA";
+    } catch (e) {
+      securitySetupError = "Network error";
     }
   }
 </script>
 
-<main class="min-h-screen flex items-center justify-center bg-base-200">
+<main class="min-h-screen bg-base-200">
   {#if !isAuthenticated}
-  <div class="card w-full max-w-sm shadow-2xl bg-base-100">
-    <div class="card-body">
-      <h2 class="card-title text-2xl justify-center font-bold mb-4">
-        {isLogin ? 'Login to Stylometry' : 'Create Account'}
-      </h2>
-
-      {#if errorMessage}
-        <div class="alert alert-error text-sm mb-4">
-          <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-          <span>{errorMessage}</span>
-        </div>
-      {/if}
-
-      <form on:submit={handleSubmit} novalidate>
-        <div class="form-control mb-4">
-          <label class="label" for="username">
-            <span class="label-text">Username</span>
-          </label>
-          <input
-            type="text"
-            id="username"
-            placeholder="johndoe"
-            class="input input-bordered w-full"
-            bind:value={username}
-            required
-            pattern="[a-zA-Z0-9_]+"
-            minlength="3"
-            maxlength="20"
-          />
-        </div>
-
-        <div class="form-control mb-4">
-          <label class="label" for="password">
-            <span class="label-text">Password</span>
-          </label>
-          <input
-            type="password"
-            id="password"
-            placeholder="••••••••"
-            class="input input-bordered w-full"
-            bind:value={password}
-            required
-            minlength="6"
-          />
-        </div>
-
-        <!-- Optional 2FA code field only shown in Login Mode -->
-        {#if isLogin}
-          <div class="form-control mb-6">
-            <label class="label" for="totpCode">
-              <span class="label-text">2FA Code (if enabled)</span>
-            </label>
-            <input
-              type="text"
-              id="totpCode"
-              placeholder="123456"
-              class="input input-bordered w-full"
-              bind:value={totpCode}
-              maxlength="6"
-              inputmode="numeric"
-            />
-          </div>
-        {:else}
-          <div class="mb-6"></div>
-        {/if}
-
-        <div class="form-control mt-2">
-          <button type="submit" class="btn btn-primary w-full">
-            {isLogin ? 'Sign In' : 'Sign Up'}
+    <!-- Login/Register UI -->
+    <div class="flex items-center justify-center min-h-screen p-4">
+      <div class="card w-full max-w-md shadow-2xl bg-base-100">
+        <div class="card-body">
+          <h2 class="card-title text-2xl font-bold justify-center mb-6">
+            {isLogin ? 'Welcome Back' : 'Create Account'}
+          </h2>
+          {#if errorMessage}
+            <div class="alert alert-error mb-4">{errorMessage}</div>
+          {/if}
+          <form on:submit={handleSubmit}>
+            <div class="form-control mb-4">
+              <label class="label"><span class="label-text">Username</span></label>
+              <input type="text" class="input input-bordered" bind:value={username} required />
+            </div>
+            <div class="form-control mb-4">
+              <label class="label"><span class="label-text">Password</span></label>
+              <input type="password" class="input input-bordered" bind:value={password} required />
+            </div>
+            {#if isLogin}
+              <div class="form-control mb-6">
+                <label class="label"><span class="label-text">2FA Code (Optional)</span></label>
+                <input type="text" class="input input-bordered" bind:value={totpCode} maxlength="6" />
+              </div>
+            {/if}
+            <button type="submit" class="btn btn-primary w-full">{isLogin ? 'Login' : 'Register'}</button>
+          </form>
+          <div class="divider">OR</div>
+          <button class="btn btn-link no-underline" on:click={() => isLogin = !isLogin}>
+            {isLogin ? 'Need an account? Register' : 'Have an account? Login'}
           </button>
         </div>
-      </form>
-
-      <div class="divider">OR</div>
-
-      <div class="text-center mt-2">
-        <button class="btn btn-link text-sm" on:click={toggleMode}>
-          {isLogin ? "Don't have an account? Register" : 'Already have an account? Login'}
-        </button>
       </div>
     </div>
-  </div>
   {:else}
-  <div class="w-full h-screen flex flex-col bg-base-200">
-    <div class="navbar bg-base-100 shadow-sm px-4 shrink-0">
-      <div class="flex-1">
-        <a href="/" class="btn btn-ghost text-xl">Stylometry Chat</a>
-      </div>
-      <div class="flex-none gap-2 flex items-center">
-        <!-- Security Enforcement Toggle -->
-        <label class="swap swap-flip mr-4 text-xs font-semibold cursor-pointer">
-          <input type="checkbox" bind:checked={securityEnforcement} />
-          <div class="swap-on text-error">Security: ON</div>
-          <div class="swap-off opacity-40">Security: OFF</div>
-        </label>
-
-        <!-- Status Feedback -->
-        <div class="hidden md:block mr-4 text-[10px] uppercase tracking-tighter font-bold">
-          {#if securityEnforcement}
-            <span class="text-error animate-pulse">● Status: Active Protection</span>
+    <!-- Authenticated UI -->
+    <div class="h-screen flex flex-col overflow-hidden">
+      <!-- Navbar -->
+      <nav class="navbar bg-base-100 shadow-md px-6 z-20">
+        <div class="flex-1">
+          <span class="text-xl font-bold tracking-tight text-primary">Stylometry Ultimate</span>
+        </div>
+        <div class="flex-none gap-4 items-center">
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-bold uppercase opacity-50">Security</span>
+            <input type="checkbox" class="toggle toggle-error toggle-sm" bind:checked={securityEnforcement} />
+          </div>
+          
+          {#if securityModeEnabled}
+            <div class="badge badge-success gap-1 py-3 px-4 font-bold text-xs uppercase">
+              🔐 PIN Active
+            </div>
           {:else}
-            <span class="text-base-content opacity-40">○ Status: Monitoring Disabled (Data Collection Mode)</span>
-          {/if}
-        </div>
-
-        <!-- Debug Toggle -->
-        <label class="swap swap-flip mr-4 text-xs font-semibold cursor-pointer">
-          <input type="checkbox" bind:checked={showDebug} />
-          <div class="swap-on text-primary">Debug: ON</div>
-          <div class="swap-off opacity-40">Debug: OFF</div>
-        </label>
-
-        {#if showDebug}
-          <div class="radial-progress text-sm mr-4 {trustScore > 80 ? 'text-success' : trustScore > 40 ? 'text-warning' : 'text-error'}" style="--value:{trustScore}; --size:3rem; --thickness: 4px;" role="progressbar">{Math.round(trustScore)}</div>
-        {/if}
-
-        <span class="text-sm font-semibold mr-2">Welcome, {currentUser}</span>
-        <button class="btn btn-outline btn-error btn-sm" on:click={logout}>
-          Logout
-        </button>
-      </div>
-    </div>
-
-    <div class="flex-1 flex flex-col lg:flex-row gap-6 p-6 overflow-hidden">
-      <Sidebar {token} />
-
-      <!-- Main Dashboard Chat Interface -->
-      <div class="flex-1 flex flex-col bg-base-100 shadow-xl rounded-box overflow-hidden h-full">
-        <div class="bg-base-200 p-4 border-b border-base-300 flex justify-between items-center z-10 shadow-sm">
-          <div class="font-bold text-lg flex items-center gap-2">
-            {#if activeChat}
-              {activeChat.name || `Room #${activeChat.id}`}
-              {#if activeChat.is_group}
-                <span class="badge badge-accent badge-sm font-semibold">{activeChat.members?.length || 0} Members</span>
-              {/if}
-            {:else}
-              Select a Chat
-            {/if}
-          </div>
-          <div class="flex items-center gap-1">
-            {#if activeChat && activeChat.is_group}
-              <button class="btn btn-sm btn-circle btn-ghost text-base-content/70 hover:text-primary transition-colors tooltip tooltip-bottom" data-tip="Manage Members" on:click={() => showMemberModal = true}>
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5">
-                  <path stroke-linecap="round" stroke-linejoin="round" d="M15 19.128a9.38 9.38 0 002.625.372 8.614 8.614 0 00-5.46-1.503M15 19.128a3.001 3.001 0 01-5.714 0m5.714 0a3.002 3.002 0 01-5.714 0M15 19.128a9.38 9.38 0 01-2.625.372 8.614 8.614 0 015.46-1.503M8.25 15.6a9.381 9.381 0 015.714 0m-5.714 0A8.616 8.616 0 0110.875 14m-2.625 1.6a9.381 9.381 0 01-2.625-.372" />
-                </svg>
-              </button>
-            {/if}
-
-          {#if activeChat}
-            <!-- 3 dots is already implemented -->
-            <div class="dropdown dropdown-end">
-              <label tabindex="0" class="btn btn-sm btn-circle btn-ghost">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" class="inline-block w-5 h-5 stroke-current"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg>
-              </label>
-              <ul tabindex="0" class="dropdown-content z-[1] menu p-2 shadow bg-base-100 rounded-box w-40 border border-base-200">
-                {#if activeChat.is_group}
-                  <li><button class="text-error font-semibold" on:click={leaveChat}>Leave Group</button></li>
-                {:else}
-                  <li><button class="text-error font-semibold" on:click={deleteChat}>Delete Chat</button></li>
-                {/if}
-              </ul>
-            </div>
-          {/if}
-          </div>
-        </div>
-
-        {#if !$selectedChatId}
-          <div class="flex-1 flex items-center justify-center text-base-content/50">
-            Please select a chat room or create a new one from the sidebar.
-          </div>
-        {:else}
-        <div class="flex-1 p-4 overflow-y-auto" bind:this={chatContainer}>
-          {#if isLoadingHistory}
-            <div class="flex items-center justify-center h-32">
-              <span class="loading loading-spinner loading-lg text-primary"></span>
-            </div>
-          {:else if messages.length === 0}
-            <div class="text-center text-base-content/50 mt-10">
-              <p>Welcome to this chat!</p>
-              <p class="text-sm">No messages yet — be the first to send one!</p>
-            </div>
-          {/if}
-
-          {#each messages as msg}
-            <div class="chat {msg.sender === currentUser ? 'chat-end' : 'chat-start'} mb-2">
-              <div class="chat-header text-xs opacity-60 mb-1 font-semibold flex gap-2 items-center">
-                {msg.sender === currentUser ? 'You' : msg.sender}
-              </div>
-              <div class="chat-bubble shadow-sm {msg.sender === currentUser ? 'bg-primary text-primary-content' : 'bg-base-200 text-base-content'}">
-                {msg.text}
-              </div>
-              <div class="chat-footer opacity-40 text-[10px] mt-1">
-                {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : ''}
-              </div>
-            </div>
-          {/each}
-        </div>
-
-        <div class="p-4 bg-base-200 border-t border-base-300 flex gap-2">
-          <input
-            type="text"
-            class="input input-bordered flex-1"
-            placeholder="Type a message..."
-            bind:value={chatInput}
-            on:keydown={handleChatKeydown}
-          />
-          <button class="btn btn-primary" on:click={sendChatMessage}>Send</button>
-        </div>
-        {/if}
-      </div>
-
-      <!-- Security Settings Panel -->
-      <div class="card w-full lg:w-96 bg-base-100 shadow-xl h-fit shrink-0">
-        <div class="card-body">
-          <h2 class="card-title text-xl border-b pb-2 mb-4">Security Settings</h2>
-
-          {#if successMessage}
-            <div class="alert alert-success text-sm mb-4">
-              <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-              <span>{successMessage}</span>
-            </div>
-          {/if}
-
-          {#if errorMessage}
-            <div class="alert alert-error text-sm mb-4">
-              <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-              <span>{errorMessage}</span>
-            </div>
-          {/if}
-
-          {#if isTotpEnabled}
-             <div class="alert alert-success text-sm mb-4">
-              <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-              <span>✅ 2FA is securely enabled for your account.</span>
-            </div>
-          {:else if !isSettingUpTOTP}
-            <p class="text-sm text-base-content/80 mb-4">Protect your account with Two-Factor Authentication (2FA).</p>
-            <button class="btn btn-outline btn-primary w-full" on:click={generateTOTP}>
-              Enable 2FA
+            <button class="btn btn-warning btn-sm" on:click={() => showSecuritySetupModal = true}>
+              Enable PIN Auth
             </button>
+          {/if}
+
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-bold uppercase opacity-50">Debug</span>
+            <input type="checkbox" class="toggle toggle-secondary toggle-sm" bind:checked={showDebug} />
+          </div>
+
+          {#if showDebug}
+            <div class="badge badge-outline gap-2 font-mono">
+              Score: <span class={trustScore < 40 ? 'text-error' : 'text-success'}>{trustScore.toFixed(1)}</span>
+            </div>
+          {/if}
+
+          <div class="divider divider-horizontal mx-0"></div>
+          <span class="text-sm font-semibold">{currentUser}</span>
+          <button class="btn btn-ghost btn-sm btn-circle" on:click={logout} title="Logout">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+            </svg>
+          </button>
+        </div>
+      </nav>
+
+      <div class="flex-1 flex overflow-hidden p-4 gap-4">
+        <Sidebar {token} />
+
+        <!-- Chat Container -->
+        <div class="flex-1 flex flex-col bg-base-100 rounded-2xl shadow-xl overflow-hidden border border-base-300">
+          {#if !$selectedChatId}
+            <div class="flex-1 flex flex-col items-center justify-center opacity-30 select-none">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-24 w-24 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+              </svg>
+              <h3 class="text-xl font-bold">Select a conversation</h3>
+            </div>
           {:else}
-            <div class="flex flex-col items-center">
-              <p class="text-sm font-semibold mb-2">1. Scan QR Code</p>
-              {#if qrCodeBase64}
-                <div class="bg-white p-2 rounded-lg mb-2">
-                  <img src="data:image/png;base64,{qrCodeBase64}" alt="TOTP QR Code" class="w-48 h-48" />
-                </div>
+            <!-- Chat Header -->
+            <div class="bg-base-200 p-4 border-b border-base-300 flex justify-between items-center">
+              <div>
+                <h3 class="font-bold text-lg">{activeChat?.name || 'Chat Room'}</h3>
+                <p class="text-xs opacity-50">{activeChat?.members?.length || 0} Members</p>
+              </div>
+              <div class="flex gap-2">
+                {#if activeChat?.is_group}
+                  <button class="btn btn-sm btn-circle btn-ghost" on:click={() => showMemberModal = true}>
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" /></svg>
+                  </button>
+                {/if}
+              </div>
+            </div>
+
+            <!-- Messages Area -->
+            <div class="flex-1 overflow-y-auto p-6" bind:this={chatContainer}>
+              {#if isLoadingHistory}
+                <div class="flex justify-center p-12"><span class="loading loading-spinner loading-lg"></span></div>
               {:else}
-                <span class="loading loading-spinner text-primary my-4"></span>
+                {#each messages as msg}
+                  <div class="chat {msg.sender === currentUser ? 'chat-end' : 'chat-start'} mb-4">
+                    <div class="chat-header text-xs opacity-50 mb-1">{msg.sender}</div>
+                    <div class="chat-bubble {msg.sender === currentUser ? 'chat-bubble-primary' : 'bg-base-200 text-base-content'}">
+                      {msg.text}
+                    </div>
+                  </div>
+                {/each}
               {/if}
-              <p class="text-xs text-base-content/60 mb-4">Secret: {totpSecretText}</p>
+            </div>
 
-              <div class="w-full divider my-2"></div>
-
-              <p class="text-sm font-semibold mb-2 w-full text-left">2. Verify & Save</p>
-              <div class="form-control w-full">
-                <input
-                  type="text"
-                  placeholder="Enter 6-digit code"
-                  class="input input-sm input-bordered w-full mb-3 text-center tracking-widest text-lg"
-                  bind:value={setupTotpCode}
-                  pattern="[0-9]{6}"
-                  maxlength="6"
-                  inputmode="numeric"
+            <!-- Input Area -->
+            <div class="p-4 bg-base-200 border-t border-base-300">
+              {#if systemAlert}
+                <div class="alert alert-warning py-2 mb-3 text-xs font-bold uppercase animate-pulse">
+                  ⚠️ {systemAlert.message}
+                </div>
+              {/if}
+              <div class="flex gap-2">
+                <input 
+                  type="text" 
+                  class="input input-bordered flex-1" 
+                  placeholder="Type a message..." 
+                  bind:value={chatInput} 
+                  on:keydown={e => e.key === 'Enter' && sendChatMessage()}
                 />
-                <button class="btn btn-success btn-sm w-full" on:click={verifyTOTP} disabled={setupTotpCode.length !== 6}>
-                  Verify & Save
-                </button>
-                <button class="btn btn-ghost btn-sm w-full mt-2" on:click={() => {isSettingUpTOTP = false; qrCodeBase64 = "";}}>
-                  Cancel
-                </button>
+                <button class="btn btn-primary px-8" on:click={sendChatMessage}>Send</button>
               </div>
             </div>
           {/if}
         </div>
       </div>
     </div>
-  </div>
   {/if}
 
-  <!-- Manage Members Modal -->
-  {#if showMemberModal && activeChat}
-  <dialog class="modal modal-open">
-    <div class="modal-box rounded-2xl p-0 overflow-hidden border border-base-300 shadow-2xl">
-      <div class="bg-base-200/50 p-6 border-b border-base-300 flex justify-between items-center">
-        <h3 class="font-bold text-xl flex items-center gap-2">
-          Manage Group Members
-        </h3>
-        <button class="btn btn-sm btn-circle btn-ghost" on:click={() => showMemberModal = false}>✕</button>
-      </div>
-      <div class="p-6 bg-base-100">
-        <div class="flex gap-2 mb-6">
-          <input type="text" placeholder="Add Username..." class="input input-bordered w-full focus:input-accent" bind:value={newMemberUsername} on:keydown={(e) => e.key === 'Enter' && addGroupMember()}/>
-          <button class="btn btn-accent px-6" on:click={addGroupMember} disabled={!newMemberUsername.trim()}>Add</button>
-        </div>
+  <!-- PIN Modal (Full Screen Overlay) -->
+  {#if showPinModal}
+    <div class="fixed inset-0 z-[100] bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+      <div class="card w-full max-w-sm bg-base-100 shadow-2xl border-2 border-error">
+        <div class="card-body items-center text-center py-10">
+          <div class="text-6xl mb-4 animate-bounce">🔐</div>
+          <h2 class="card-title text-2xl font-bold text-error">Session Frozen</h2>
+          <p class="text-sm opacity-70 mb-6">Critical typing anomaly detected. Enter your 6-digit PIN to unfreeze your session.</p>
+          
+          <div class="form-control w-full mb-4">
+            <input 
+              type="password" 
+              class="input input-bordered input-error text-center tracking-[1em] text-2xl font-bold" 
+              maxlength="6" 
+              placeholder="••••••"
+              bind:value={pinInput}
+              on:keydown={e => e.key === 'Enter' && submitPin()}
+              autofocus
+            />
+          </div>
 
-        <div class="text-sm font-semibold mb-2 text-base-content/80">Current Members ({activeChat.members.length})</div>
+          {#if pinError}
+            <p class="text-error text-sm font-bold mb-4">{pinError}</p>
+          {/if}
+
+          <button class="btn btn-error w-full text-white font-bold" on:click={submitPin} disabled={pinInput.length !== 6}>
+            Verify & Unfreeze
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Security Setup Modal -->
+  {#if showSecuritySetupModal}
+    <dialog class="modal modal-open">
+      <div class="modal-box max-w-sm">
+        <h3 class="font-bold text-lg mb-4">Setup Security PIN</h3>
+        {#if securitySetupSuccess}
+          <div class="alert alert-success">PIN Setup Successful!</div>
+        {:else}
+          <p class="text-sm opacity-70 mb-4">Set a 6-digit PIN to enable step-up authentication. This prevents hard-kicks if stylometry fails.</p>
+          <div class="form-control mb-4">
+            <label class="label"><span class="label-text">6-Digit PIN</span></label>
+            <input type="password" class="input input-bordered text-center" maxlength="6" bind:value={securitySetupPin} />
+          </div>
+          <div class="form-control mb-6">
+            <label class="label"><span class="label-text">Confirm PIN</span></label>
+            <input type="password" class="input input-bordered text-center" maxlength="6" bind:value={securitySetupConfirmPin} />
+          </div>
+          {#if securitySetupError}
+            <p class="text-error text-sm mb-4">{securitySetupError}</p>
+          {/if}
+          <div class="modal-action">
+            <button class="btn btn-ghost" on:click={() => showSecuritySetupModal = false}>Cancel</button>
+            <button class="btn btn-primary" on:click={enableSecurityMode}>Enable</button>
+          </div>
+        {/if}
+      </div>
+    </dialog>
+  {/if}
+
+  <!-- Member Management Modal -->
+  {#if showMemberModal && activeChat}
+    <dialog class="modal modal-open">
+      <div class="modal-box">
+        <h3 class="font-bold text-lg mb-4">Manage Members</h3>
+        <div class="flex gap-2 mb-6">
+          <input type="text" placeholder="Username" class="input input-bordered flex-1" bind:value={newMemberUsername} />
+          <button class="btn btn-primary" on:click={addGroupMember}>Add</button>
+        </div>
         <div class="space-y-2 max-h-60 overflow-y-auto">
           {#each activeChat.members as member}
-            <div class="flex justify-between items-center bg-base-200/50 p-3 rounded-xl border border-base-200">
-              <span class="font-medium text-[15px] {member.username === currentUser ? 'text-primary' : ''}">{member.username} {member.username === currentUser ? '(You)' : ''}</span>
+            <div class="flex justify-between items-center p-2 bg-base-200 rounded-lg">
+              <span class="font-medium">{member.username}</span>
               {#if member.username !== currentUser}
                 <button class="btn btn-xs btn-error btn-outline" on:click={() => removeGroupMember(member.username)}>Remove</button>
               {/if}
             </div>
           {/each}
         </div>
+        <div class="modal-action">
+          <button class="btn btn-ghost" on:click={() => showMemberModal = false}>Close</button>
+        </div>
       </div>
-    </div>
-    <form method="dialog" class="modal-backdrop bg-neutral/60 backdrop-blur-sm" on:click={() => showMemberModal = false}>
-      <button>close</button>
-    </form>
-  </dialog>
+    </dialog>
   {/if}
 </main>

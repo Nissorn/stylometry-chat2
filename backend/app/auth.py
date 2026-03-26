@@ -5,44 +5,41 @@ from io import BytesIO
 
 import pyotp
 import qrcode
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Header
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from . import database, models, schemas
+from .ws_manager import manager
 
 router = APIRouter()
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # ---------------------------------------------------------------------------
-# JWT Secret — fail fast so the app never silently runs with a weak default.
-# Supports the canonical JWT_SECRET_KEY name and the legacy SECRET_KEY alias
-# so existing .env files keep working without modification.
+# JWT Secret
 # ---------------------------------------------------------------------------
 SECRET_KEY: str = os.getenv("JWT_SECRET_KEY") or os.getenv("SECRET_KEY") or ""
 if not SECRET_KEY:
     raise RuntimeError(
         "FATAL: Neither JWT_SECRET_KEY nor SECRET_KEY environment variable is set. "
-        "The application cannot start without a JWT signing secret. "
-        "Set JWT_SECRET_KEY to a long, random string (e.g. `openssl rand -hex 32`)."
     )
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 10080
 
 
-def get_password_hash(password):
+def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 
-def verify_password(plain_password, hashed_password):
+def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
 
-def create_access_token(data: dict):
+def create_access_token(data: dict) -> str:
     to_encode = data.copy()
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
@@ -59,16 +56,18 @@ def get_current_user(
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         if username is None:
-            print("AUTH FAILED: No sub in payload")
             raise HTTPException(status_code=401, detail="Invalid token")
-    except JWTError as e:
-        print(f"AUTH FAILED: JWTError {e}")
-        raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
     user = db.query(models.User).filter(models.User.username == username).first()
     if user is None:
-        print(f"AUTH FAILED: User {username} not found in DB")
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+
+# ---------------------------------------------------------------------------
+# Auth routes
+# ---------------------------------------------------------------------------
 
 
 @router.post("/register", response_model=schemas.Token)
@@ -90,7 +89,7 @@ def register(user: schemas.UserCreate, db: Session = Depends(database.get_db)):
         "access_token": access_token,
         "token_type": "bearer",
         "is_totp_enabled": False,
-        "security_enabled": True,
+        "security_enabled": False,
     }
 
 
@@ -114,6 +113,10 @@ def login(req: schemas.LoginRequest, db: Session = Depends(database.get_db)):
         "is_totp_enabled": user.is_totp_enabled,
         "security_enabled": user.security_enabled,
     }
+
+@router.get("/me", response_model=schemas.UserMeResponse)
+def get_me(current_user: models.User = Depends(get_current_user)):
+    return current_user
 
 
 @router.post("/totp/generate")
@@ -167,6 +170,35 @@ def verify_totp(
     }
 
 
-@router.get("/me", response_model=schemas.UserResponse)
-def get_me(current_user: models.User = Depends(get_current_user)):
-    return current_user
+# ---------------------------------------------------------------------------
+# Step-Up Security — PIN registration & Verification
+# ---------------------------------------------------------------------------
+
+
+@router.post("/security/enable")
+def enable_security(
+    req: schemas.EnableSecurityRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(database.get_db),
+):
+    current_user.unlock_pin_hash = pwd_context.hash(req.pin)
+    current_user.security_enabled = True
+    db.commit()
+    return {"detail": "Security mode enabled."}
+
+
+@router.post("/verify-pin")
+def verify_pin(
+    req: schemas.VerifyPinRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(database.get_db),
+):
+    if not current_user.unlock_pin_hash or not verify_password(
+        req.pin, current_user.unlock_pin_hash
+    ):
+        raise HTTPException(status_code=400, detail="Incorrect PIN")
+
+    current_user.is_frozen = False
+    db.commit()
+    manager.reset_user_trust_score(current_user.username)
+    return {"detail": "Account unfrozen and trust score reset."}

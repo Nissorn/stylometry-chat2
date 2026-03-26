@@ -31,6 +31,12 @@ class ConnectionManager:
         # Global state: { username: trust_score }
         self.user_trust_scores: Dict[str, float] = {}
 
+        # Session state machine: "ACTIVE" | "LOCKED"
+        self.user_states: Dict[str, str] = {}
+
+        # Holds pending messages for confirmation
+        self.pending_messages: Dict[str, str] = {}
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -127,6 +133,22 @@ class ConnectionManager:
         """Update the global trust score for *username*."""
         self.user_trust_scores[username] = score
         print(f"[WS] Global trust update for {username} → {score:.2f}")
+
+    def reset_user_trust_score(self, username: str) -> None:
+        """Reset the global trust score for *username* to 100.0."""
+        self.user_trust_scores[username] = 100.0
+        print(f"[WS] Global trust RESET for {username} → 100.00")
+
+    def lock(self, username: str) -> None:
+        """Freeze the session in-memory."""
+        self.user_states[username] = "LOCKED"
+        print(f"DEBUG: Session LOCKED — {username}")
+
+    def unlock(self, username: str) -> None:
+        """Restore the session in-memory."""
+        self.user_states[username] = "ACTIVE"
+        self.pending_messages.pop(username, None)
+        print(f"DEBUG: Session UNLOCKED — {username}")
 
     def __repr__(self) -> str:  # pragma: no cover
         summary = {cid: list(users) for cid, users in self.active_rooms.items()}
