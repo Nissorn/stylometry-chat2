@@ -1,10 +1,13 @@
 <script>
   import { onMount } from 'svelte';
   import { selectedChatId, chats } from './store.js';
+  import { getApiBaseUrl } from './config.js';
 
   export let token = "";
 
   // Create Modal State
+  const API_BASE = getApiBaseUrl();
+
   let showModal = false;
   let newChatName = "";
   let isGroupChat = false;
@@ -12,7 +15,6 @@
   let memberUsernames = [];
 
   async function fetchChats() {
-    const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
     try {
       const res = await fetch(`${API_BASE}/chats/me`, {
         headers: { "Authorization": `Bearer ${token}` }
@@ -49,7 +51,6 @@
   async function createChat() {
     if (!newChatName.trim()) return;
     try {
-      const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
       const res = await fetch(`${API_BASE}/chats/`, {
         method: "POST",
         headers: {

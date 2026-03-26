@@ -89,3 +89,12 @@ class EnableSecurityRequest(BaseModel):
 
 class VerifyPinRequest(BaseModel):
     pin: str = Field(..., pattern=r"^\d{6}$")
+
+
+class SuspiciousMessagesResponse(BaseModel):
+    messages: List[str]
+    requires_review: bool = False
+
+
+class ReviewMessagesRequest(BaseModel):
+    approved: bool

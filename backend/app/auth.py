@@ -3,6 +3,7 @@ import os
 from datetime import datetime, timedelta
 from io import BytesIO
 
+import httpx
 import pyotp
 import qrcode
 from fastapi import APIRouter, Depends, HTTPException, status, Header
@@ -12,6 +13,7 @@ from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from . import database, models, schemas
+from .crypto import encrypt
 from .ws_manager import manager
 
 router = APIRouter()
@@ -29,6 +31,7 @@ if not SECRET_KEY:
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 10080
+ML_TRAIN_URL = "http://stylometry-ml-service:8001/train"
 
 
 def get_password_hash(password: str) -> str:
@@ -198,7 +201,86 @@ def verify_pin(
     ):
         raise HTTPException(status_code=400, detail="Incorrect PIN")
 
+    pending = manager.get_pending_messages(current_user.username)
+    return {
+        "detail": "PIN verified. Please review suspicious messages.",
+        "requires_review": len(pending) > 0,
+    }
+
+
+@router.get("/suspicious-messages", response_model=schemas.SuspiciousMessagesResponse)
+def get_suspicious_messages(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(database.get_db),
+):
+    messages = manager.get_pending_messages(current_user.username)
+
+    # Fallback: if in-memory context is missing, use latest user messages.
+    if not messages:
+        rows = (
+            db.query(models.Message)
+            .filter(models.Message.sender_id == current_user.id)
+            .order_by(models.Message.id.desc())
+            .limit(5)
+            .all()
+        )
+        messages = [m.text for m in reversed(rows)]
+
+    return {
+        "messages": messages,
+        "requires_review": len(messages) > 0,
+    }
+
+
+@router.post("/review-messages")
+async def review_messages(
+    req: schemas.ReviewMessagesRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(database.get_db),
+):
+    username = current_user.username
+    messages = manager.get_pending_messages(username)
+
+    review_count = len(messages)
+    appended_count = 0
+    train_triggered = False
+
+    if req.approved and messages:
+        data_dir = "/ml_workspace/data"
+        os.makedirs(data_dir, exist_ok=True)
+        baseline_path = os.path.join(data_dir, f"{username}_baseline.txt")
+
+        with open(baseline_path, "a", encoding="utf-8") as f:
+            for msg in messages:
+                clean_msg = str(msg).strip()
+                if not clean_msg:
+                    continue
+                f.write(encrypt(clean_msg) + "\n")
+                appended_count += 1
+
+        if appended_count > 0:
+            line_count = 0
+            with open(baseline_path, "r", encoding="utf-8") as f:
+                line_count = sum(1 for ln in f if ln.strip())
+
+            if line_count >= 50 and (line_count == 50 or line_count % 10 == 0):
+                try:
+                    async with httpx.AsyncClient() as client:
+                        await client.post(f"{ML_TRAIN_URL}/{username}", timeout=30.0)
+                    train_triggered = True
+                except Exception as exc:
+                    print(f"[AUTH] Retrain trigger failed for {username}: {exc}")
+
+    manager.clear_pending_messages(username)
     current_user.is_frozen = False
     db.commit()
-    manager.reset_user_trust_score(current_user.username)
-    return {"detail": "Account unfrozen and trust score reset."}
+    manager.unlock(username)
+    manager.reset_user_trust_score(username)
+
+    return {
+        "detail": "Review submitted and session restored.",
+        "approved": req.approved,
+        "reviewed_count": review_count,
+        "appended_count": appended_count,
+        "train_triggered": train_triggered,
+    }

@@ -34,8 +34,8 @@ class ConnectionManager:
         # Session state machine: "ACTIVE" | "LOCKED"
         self.user_states: Dict[str, str] = {}
 
-        # Holds pending messages for confirmation
-        self.pending_messages: Dict[str, str] = {}
+        # Holds pending suspicious messages for post-freeze review.
+        self.pending_messages: Dict[str, List[str]] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -149,6 +149,18 @@ class ConnectionManager:
         self.user_states[username] = "ACTIVE"
         self.pending_messages.pop(username, None)
         print(f"DEBUG: Session UNLOCKED — {username}")
+
+    def set_pending_messages(self, username: str, messages: List[str]) -> None:
+        """Persist the latest suspicious messages for explicit user confirmation."""
+        self.pending_messages[username] = [m for m in messages if str(m).strip()]
+
+    def get_pending_messages(self, username: str) -> List[str]:
+        """Return pending suspicious messages captured before session freeze."""
+        return list(self.pending_messages.get(username, []))
+
+    def clear_pending_messages(self, username: str) -> None:
+        """Clear any pending suspicious messages once review is complete."""
+        self.pending_messages.pop(username, None)
 
     def __repr__(self) -> str:  # pragma: no cover
         summary = {cid: list(users) for cid, users in self.active_rooms.items()}

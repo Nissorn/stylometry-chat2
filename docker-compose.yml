@@ -14,17 +14,20 @@ version: "3.8"
 #
 # Optional (sensible defaults provided):
 #
-#   ALLOWED_ORIGINS  — Comma-separated list of allowed CORS origins.
+#   ALLOW_ORIGINS    — Comma-separated list of allowed CORS origins.
 #                      e.g. http://your-droplet-ip:5173,https://yourdomain.com
 #                      Defaults to * (allow all) — OVERRIDE IN PRODUCTION.
 #
-#   VITE_API_BASE    — Full HTTP URL the browser uses to reach the backend API.
+#   VITE_API_BASE_URL — Full HTTP URL the browser uses to reach the backend API.
 #                      e.g. http://your-droplet-ip:8000
 #                      Defaults to http://localhost:8000
 #
-#   VITE_WS_BASE     — Full WS URL the browser uses for WebSocket connections.
+#   VITE_WS_BASE_URL — Full WS URL the browser uses for WebSocket connections.
 #                      e.g. ws://your-droplet-ip:8000
 #                      Defaults to ws://localhost:8000
+#
+#   FRONTEND_PORT    — External port exposing the frontend container port 5173.
+#                      Default is 80 for production-friendly access.
 #
 # Data Persistence on DigitalOcean Droplet:
 #   - SQLite database  → bind-mounted at ./backend/app.db (never inside the container layer)
@@ -69,8 +72,9 @@ services:
 
       # ── CORS Allowed Origins ─────────────────────────────────────────────────
       # Set to your Droplet's public IP / domain in production:
-      #   ALLOWED_ORIGINS=http://your-droplet-ip:5173,https://yourdomain.com
-      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-*}
+      #   ALLOW_ORIGINS=http://your-droplet-ip:80,https://yourdomain.com
+      # Backward-compatible fallback still supported by backend: ALLOWED_ORIGINS
+      - ALLOW_ORIGINS=${ALLOW_ORIGINS:-${ALLOWED_ORIGINS:-*}}
 
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
@@ -91,7 +95,7 @@ services:
     container_name: stylometry_frontend
     restart: unless-stopped
     ports:
-      - "5173:5173"
+      - "${FRONTEND_PORT:-80}:5173"
     volumes:
       - ./frontend:/app
       # Prevent the host from shadowing the container's node_modules
@@ -100,10 +104,12 @@ services:
       # ── API & WebSocket base URLs ────────────────────────────────────────────
       # Vite exposes VITE_* variables to the browser via import.meta.env.
       # Set these to your Droplet's public IP or domain before deploying:
-      #   VITE_API_BASE=http://your-droplet-ip:8000
-      #   VITE_WS_BASE=ws://your-droplet-ip:8000
-      - VITE_API_BASE=${VITE_API_BASE:-http://localhost:8000}
-      - VITE_WS_BASE=${VITE_WS_BASE:-ws://localhost:8000}
+      #   VITE_API_BASE_URL=http://your-droplet-ip:8000
+      #   VITE_WS_BASE_URL=ws://your-droplet-ip:8000
+      # Backward-compatible fallbacks are also supported in frontend code:
+      #   VITE_API_BASE, VITE_WS_BASE
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL:-${VITE_API_BASE:-http://localhost:8000}}
+      - VITE_WS_BASE_URL=${VITE_WS_BASE_URL:-${VITE_WS_BASE:-ws://localhost:8000}}
     command: npm run dev -- --host 0.0.0.0
     depends_on:
       - backend

@@ -2,10 +2,11 @@
   import { onMount, tick } from 'svelte';
   import Sidebar from './Sidebar.svelte';
   import { selectedChatId, chats } from './store.js';
+  import { getApiBaseUrl, getWsBaseUrl } from './config.js';
 
   // ── API/WS Config ──────────────────────────────────────────────────────────
-  const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
-  const WS_BASE  = import.meta.env.VITE_WS_BASE  || "ws://localhost:8000";
+  const API_BASE = getApiBaseUrl();
+  const WS_BASE  = getWsBaseUrl();
 
   // ── Auth State ─────────────────────────────────────────────────────────────
   let isAuthenticated = false;
@@ -38,6 +39,7 @@
   let securityEnforcement = true;
   let showDebug = false;
   let currentWsId = null;
+  let historyRequestToken = 0;
 
   // ── Modal Visibility ───────────────────────────────────────────────────────
   let showRegisterModal = false;
@@ -66,6 +68,10 @@
 
   let pinInput = "";
   let pinError = "";
+  let showReviewStep = false;
+  let suspiciousMessages = [];
+  let reviewError = "";
+  let isReviewSubmitting = false;
   let systemAlert = null;
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -83,15 +89,29 @@
   });
 
   // ── WebSocket Connectivity ─────────────────────────────────────────────────
-  $: if (isAuthenticated && $selectedChatId && $selectedChatId !== currentWsId) {
-    if (ws) {
-      ws.close();
-      ws = null;
+  $: if (isAuthenticated) {
+    const selectedId = $selectedChatId;
+
+    if (!selectedId) {
+      historyRequestToken += 1;
+      isLoadingHistory = false;
+      messages = [];
+      currentWsId = null;
+      if (ws) {
+        ws.close();
+        ws = null;
+      }
+    } else if (Number(selectedId) !== Number(currentWsId)) {
+      historyRequestToken += 1;
+      if (ws) {
+        ws.close();
+        ws = null;
+      }
+      messages = [];
+      fetchChatHistory(selectedId);
+      connectWebSocket(selectedId);
+      currentWsId = selectedId;
     }
-    messages = [];
-    fetchChatHistory($selectedChatId);
-    connectWebSocket($selectedChatId);
-    currentWsId = $selectedChatId;
   }
 
   async function checkFrozenStatus() {
@@ -103,6 +123,9 @@
         const data = await res.json();
         if (data.is_frozen) {
           showPinModal = true;
+          showReviewStep = false;
+          suspiciousMessages = [];
+          reviewError = "";
         }
       }
     } catch (e) {}
@@ -110,6 +133,7 @@
 
   async function fetchChatHistory(chatId) {
     if (!chatId) return;
+    const requestToken = ++historyRequestToken;
     isLoadingHistory = true;
     try {
       const res = await fetch(`${API_BASE}/chats/${chatId}/messages`, {
@@ -117,17 +141,26 @@
       });
       if (res.ok) {
         const raw = await res.json();
-        messages = raw.map(m => ({
+        if (requestToken !== historyRequestToken || Number($selectedChatId) !== Number(chatId)) {
+          return;
+        }
+
+        const loadedMessages = raw.map(m => ({
           sender: m.sender_username,
           text: m.text,
-          timestamp: m.timestamp
+          timestamp: m.timestamp,
+          chat_id: m.chat_id
         }));
+
+        messages = loadedMessages;
         scrollToBottom();
       }
     } catch (e) {
       console.error("[History] Error:", e);
     } finally {
-      isLoadingHistory = false;
+      if (requestToken === historyRequestToken) {
+        isLoadingHistory = false;
+      }
     }
   }
 
@@ -137,27 +170,47 @@
     ws = new WebSocket(wsUrl);
 
     ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === "chat") {
-        const text = data.is_broadcast ? data.message : (data.text || "");
-        messages = [...messages, { 
-          sender: data.sender, 
-          text, 
-          timestamp: new Date().toISOString() 
-        }];
-        scrollToBottom();
-      } else if (data.type === "trust_update") {
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch (err) {
+        console.error("[WS] Invalid payload:", err);
+        return;
+      }
+
+      if (data.type === "trust_update") {
         trustScore = data.trust_score;
       } else if (data.type === "group_updated") {
         chats.update(list =>
           list.map(c => c.id === data.chat_id ? { ...c, members: data.members } : c)
         );
-        if (data.kicked_user === currentUser && data.chat_id === chatId) {
+        if (data.kicked_user === currentUser && Number(data.chat_id) === Number(chatId)) {
           ws.close();
           selectedChatId.set(null);
         }
       } else if (data.type === "system_alert") {
         systemAlert = data.clear ? null : { message: data.message };
+      } else if (data.type === "chat" || data.type === "new_message") {
+        const incomingChatId = data.chat_id ?? chatId;
+        if (Number(incomingChatId) !== Number($selectedChatId)) {
+          return;
+        }
+
+        const incomingText = String(data.text ?? data.message ?? "");
+        if (!incomingText.trim()) {
+          return;
+        }
+
+        messages = [
+          ...messages,
+          {
+            chat_id: Number(incomingChatId),
+            sender: data.sender ?? data.sender_username ?? "Unknown",
+            text: incomingText,
+            timestamp: data.timestamp || new Date().toISOString()
+          }
+        ];
+        scrollToBottom();
       }
     };
 
@@ -167,6 +220,9 @@
       if (event.code === 4001) {
         if (securityModeEnabled) {
           showPinModal = true;
+          showReviewStep = false;
+          suspiciousMessages = [];
+          reviewError = "";
         } else {
           forceLockout();
         }
@@ -186,18 +242,69 @@
         body: JSON.stringify({ pin: pinInput })
       });
       if (res.ok) {
-        showPinModal = false;
-        pinInput = "";
         pinError = "";
-        trustScore = 100.0;
-        systemAlert = null;
-        if ($selectedChatId) connectWebSocket($selectedChatId);
+        await loadSuspiciousMessages();
+        showReviewStep = true;
       } else {
         const data = await res.json();
         pinError = data.detail || "Invalid PIN";
       }
     } catch (e) {
       pinError = "Connection error";
+    }
+  }
+
+  async function loadSuspiciousMessages() {
+    reviewError = "";
+    suspiciousMessages = [];
+    try {
+      const res = await fetch(`${API_BASE}/auth/suspicious-messages`, {
+        headers: {
+          "Authorization": `Bearer ${token}`
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        suspiciousMessages = Array.isArray(data.messages) ? data.messages : [];
+      } else {
+        const data = await res.json();
+        reviewError = data.detail || "Failed to load suspicious messages";
+      }
+    } catch (e) {
+      reviewError = "Connection error while loading suspicious messages";
+    }
+  }
+
+  async function submitReviewDecision(approved) {
+    isReviewSubmitting = true;
+    reviewError = "";
+    try {
+      const res = await fetch(`${API_BASE}/auth/review-messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({ approved })
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        reviewError = data.detail || "Failed to submit review";
+        return;
+      }
+
+      showPinModal = false;
+      showReviewStep = false;
+      suspiciousMessages = [];
+      pinInput = "";
+      pinError = "";
+      trustScore = 100.0;
+      systemAlert = null;
+      if ($selectedChatId) connectWebSocket($selectedChatId);
+    } catch (e) {
+      reviewError = "Connection error while submitting review";
+    } finally {
+      isReviewSubmitting = false;
     }
   }
 
@@ -214,6 +321,12 @@
     if (ws) ws.close();
     ws = null;
     messages = [];
+    showPinModal = false;
+    showReviewStep = false;
+    suspiciousMessages = [];
+    pinInput = "";
+    pinError = "";
+    reviewError = "";
     selectedChatId.set(null);
   }
 
@@ -676,29 +789,67 @@
     <div class="fixed inset-0 z-[100] bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
       <div class="card w-full max-w-sm bg-base-100 shadow-2xl border-2 border-error">
         <div class="card-body items-center text-center py-10">
-          <div class="text-6xl mb-4 animate-bounce">🔐</div>
-          <h2 class="card-title text-2xl font-bold text-error">Session Frozen</h2>
-          <p class="text-sm opacity-70 mb-6">Critical typing anomaly detected. Enter your 6-digit PIN to unfreeze your session.</p>
-          
-          <div class="form-control w-full mb-4">
-            <input 
-              type="password" 
-              class="input input-bordered input-error text-center tracking-[1em] text-2xl font-bold" 
-              maxlength="6" 
-              placeholder="••••••"
-              bind:value={pinInput}
-              on:keydown={e => e.key === 'Enter' && submitPin()}
-              autofocus
-            />
-          </div>
+          {#if !showReviewStep}
+            <div class="text-6xl mb-4 animate-bounce">🔐</div>
+            <h2 class="card-title text-2xl font-bold text-error">Session Frozen</h2>
+            <p class="text-sm opacity-70 mb-6">Critical typing anomaly detected. Enter your 6-digit PIN to continue.</p>
 
-          {#if pinError}
-            <p class="text-error text-sm font-bold mb-4">{pinError}</p>
+            <div class="form-control w-full mb-4">
+              <input
+                type="password"
+                class="input input-bordered input-error text-center tracking-[1em] text-2xl font-bold"
+                maxlength="6"
+                placeholder="••••••"
+                bind:value={pinInput}
+                on:keydown={e => e.key === 'Enter' && submitPin()}
+              />
+            </div>
+
+            {#if pinError}
+              <p class="text-error text-sm font-bold mb-4">{pinError}</p>
+            {/if}
+
+            <button class="btn btn-error w-full text-white font-bold" on:click={submitPin} disabled={pinInput.length !== 6}>
+              Verify PIN
+            </button>
+          {:else}
+            <h2 class="card-title text-xl font-bold">Review Suspicious Messages</h2>
+            <p class="text-sm opacity-70 mb-4">Did you send these messages?</p>
+
+            <div class="w-full max-h-56 overflow-y-auto bg-base-200 rounded-xl p-3 mb-4 text-left">
+              {#if suspiciousMessages.length === 0}
+                <p class="text-xs opacity-60">No captured messages found. You can still submit your decision.</p>
+              {:else}
+                {#each suspiciousMessages as msg, idx}
+                  <div class="mb-2 last:mb-0">
+                    <p class="text-[11px] font-bold opacity-50">Message {idx + 1}</p>
+                    <p class="text-sm break-words">{msg}</p>
+                  </div>
+                {/each}
+              {/if}
+            </div>
+
+            {#if reviewError}
+              <p class="text-error text-sm font-bold mb-4">{reviewError}</p>
+            {/if}
+
+            <div class="w-full grid grid-cols-1 gap-2">
+              <button
+                class="btn btn-success font-bold"
+                on:click={() => submitReviewDecision(true)}
+                disabled={isReviewSubmitting}
+              >
+                Yes, I sent these
+              </button>
+              <button
+                class="btn btn-error text-white font-bold"
+                on:click={() => submitReviewDecision(false)}
+                disabled={isReviewSubmitting}
+              >
+                No, it wasn't me
+              </button>
+            </div>
           {/if}
-
-          <button class="btn btn-error w-full text-white font-bold" on:click={submitPin} disabled={pinInput.length !== 6}>
-            Verify & Unfreeze
-          </button>
         </div>
       </div>
     </div>

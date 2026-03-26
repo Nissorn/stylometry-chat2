@@ -51,7 +51,11 @@ _run_migrations()
 # ---------------------------------------------------------------------------
 app = FastAPI(title="Thai-Stylometry Ultimate App")
 
-_raw_origins: str = os.getenv("ALLOWED_ORIGINS", "*").strip()
+_raw_origins: str = (
+    os.getenv("ALLOW_ORIGINS")
+    or os.getenv("ALLOWED_ORIGINS")
+    or "*"
+).strip()
 
 if _raw_origins == "*":
     _allow_origins: list[str] = ["*"]
@@ -165,6 +169,7 @@ async def websocket_endpoint(
                     text: str = str(data.get("message", ""))
                     enforce_security: bool = bool(data.get("enforce_security", False))
                     clean_text = text.strip()
+                    message_timestamp: Optional[str] = None
 
                     if len(clean_text) > 0:
                         msg_buffer.append(clean_text)
@@ -176,6 +181,9 @@ async def websocket_endpoint(
                         )
                         db.add(new_msg)
                         db.commit()
+                        message_timestamp = (
+                            new_msg.timestamp.isoformat() if new_msg.timestamp else None
+                        )
 
                         # ── Baseline Auto-Collection ─────────────────────────
                         if trust_score > 90.0:
@@ -221,8 +229,11 @@ async def websocket_endpoint(
                                 chat_id,
                                 {
                                     "type": "chat",
+                                    "chat_id": chat_id,
                                     "sender": username,
-                                    "message": text,
+                                    "message": clean_text,
+                                    "text": clean_text,
+                                    "timestamp": message_timestamp,
                                     "trust_score": round(trust_score, 2),
                                     "is_broadcast": True,
                                 },
@@ -258,8 +269,11 @@ async def websocket_endpoint(
                                         chat_id,
                                         {
                                             "type": "chat",
+                                            "chat_id": chat_id,
                                             "sender": username,
-                                            "message": text,
+                                            "message": clean_text,
+                                            "text": clean_text,
+                                            "timestamp": message_timestamp,
                                             "trust_score": round(trust_score, 2),
                                             "is_broadcast": True,
                                         },
@@ -292,6 +306,8 @@ async def websocket_endpoint(
                                         db.refresh(user)
                                         user.is_frozen = True
                                         db.commit()
+                                        manager.set_pending_messages(username, list(msg_buffer)[-5:])
+                                        manager.lock(username)
                                         print(f"[WS] Session locked for '{username}' (trust={trust_score})")
                                         await websocket.close(code=4001)
                                         break
@@ -300,8 +316,11 @@ async def websocket_endpoint(
                                         chat_id,
                                         {
                                             "type": "chat",
+                                            "chat_id": chat_id,
                                             "sender": username,
-                                            "message": text,
+                                            "message": clean_text,
+                                            "text": clean_text,
+                                            "timestamp": message_timestamp,
                                             "trust_score": round(trust_score, 2),
                                             "is_broadcast": True,
                                         },
@@ -313,8 +332,11 @@ async def websocket_endpoint(
                                 chat_id,
                                 {
                                     "type": "chat",
+                                    "chat_id": chat_id,
                                     "sender": username,
-                                    "message": text,
+                                    "message": clean_text,
+                                    "text": clean_text,
+                                    "timestamp": message_timestamp,
                                     "trust_score": round(trust_score, 2),
                                     "is_broadcast": True,
                                 },
