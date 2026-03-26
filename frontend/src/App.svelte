@@ -4,7 +4,9 @@
   let isLogin = true;
   let username = "";
   let password = "";
+  let showPassword = false;
   let totpCode = ""; // Optional 2FA for login
+  let showTotpCode = false;
   let errorMessage = "";
   let successMessage = "";
 
@@ -30,27 +32,189 @@
   let trustScore = 100.0;
   let showDebug = false;
   let securityEnforcement = true;
+  // Navigation & Screen State
+  let currentScreen = "welcome"; // welcome, login, register, chat, profile, edit_profile
+  
+  // Profile Data (State from Backend)
+  let profileData = {
+    username: "",
+    full_name: "",
+    email: "",
+    birth_date: "",
+    age: null,
+    gender: "",
+    blood_type: "",
+    height: null,
+    weight: null,
+    avatar_url: null,
+    is_totp_enabled: false
+  };
 
-  const API_BASE = "http://localhost:8000";
+  // Profile Draft for editing (Form state)
+  let profileDraft = { ...profileData };
+
+  const API_BASE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    ? "http://localhost:8000"
+    : "http://172.20.10.2:8000";
+
+  function getAvatarUrl(url) {
+    if (!url) return "";
+    if (url.startsWith("data:") || url.startsWith("http")) return url;
+    return API_BASE + url;
+  }
+
+  let fileInput;
+
+  function triggerFileInput() {
+    fileInput.click();
+  }
+
+  let selectedImageFile = null;
+
+  function handleFileChange(event) {
+    const file = event.target.files[0];
+    if (file) {
+      selectedImageFile = file;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        profileDraft.avatar_url = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+  }
+
+  function removePhoto() {
+    selectedImageFile = null;
+    profileDraft.avatar_url = null;
+    if (fileInput) fileInput.value = '';
+  }
+
+  function handleBirthDateInput(event) {
+    let val = event.target.value.replace(/\D/g, '');
+    if (val.length > 8) val = val.slice(0, 8);
+    let formatted = val;
+    if (val.length > 4) {
+      formatted = `${val.slice(0, 2)}/${val.slice(2, 4)}/${val.slice(4)}`;
+    } else if (val.length > 2) {
+      formatted = `${val.slice(0, 2)}/${val.slice(2)}`;
+    }
+    profileDraft.birth_date = formatted;
+
+    if (formatted.length === 10) {
+      const parts = formatted.split('/');
+      if (parts.length === 3) {
+        const [day, month, year] = parts;
+        const dob = new Date(`${year}-${month}-${day}`);
+        if (!isNaN(dob.getTime())) {
+          const today = new Date();
+          let age = today.getFullYear() - dob.getFullYear();
+          const m = today.getMonth() - dob.getMonth();
+          if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) {
+            age--;
+          }
+          profileDraft.age = age;
+        }
+      }
+    } else {
+      profileDraft.age = null;
+    }
+  }
+
+  async function fetchProfile() {
+    const token = localStorage.getItem("token");
+    if (!token) return;
+
+    try {
+      const response = await fetch(`${API_BASE}/auth/profile`, {
+        headers: { "Authorization": `Bearer ${token}` }
+      });
+      if (response.ok) {
+        profileData = await response.json();
+        profileDraft = { ...profileData };
+      }
+    } catch (error) {
+      console.error("Fetch profile failed", error);
+    }
+  }
+
+  async function saveProfile() {
+    const token = localStorage.getItem("token");
+    try {
+      if (selectedImageFile) {
+        const formData = new FormData();
+        formData.append("file", selectedImageFile);
+        const imgRes = await fetch(`${API_BASE}/auth/upload-image`, {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${token}` },
+          body: formData
+        });
+        if (imgRes.ok) {
+          const data = await imgRes.json();
+          profileDraft.avatar_url = data.avatar_url;
+        }
+      }
+
+      const response = await fetch(`${API_BASE}/auth/profile`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          full_name: profileDraft.full_name,
+          email: profileDraft.email,
+          birth_date: profileDraft.birth_date,
+          age: profileDraft.age,
+          gender: profileDraft.gender,
+          blood_type: profileDraft.blood_type,
+          height: profileDraft.height,
+          weight: profileDraft.weight
+        })
+      });
+      if (response.ok) {
+        // Use the returned updated profile directly to avoid any browser GET caching issues
+        profileData = await response.json();
+        profileDraft = { ...profileData };
+        selectedImageFile = null;
+        successMessage = "Profile updated successfully!";
+        goTo('profile');
+      } else {
+        errorMessage = "Failed to update profile";
+      }
+    } catch (error) {
+      errorMessage = "Network error updating profile";
+    }
+  }
 
   onMount(() => {
     const storedToken = localStorage.getItem("token");
     const storedUser = localStorage.getItem("username");
-    const storedTotp = localStorage.getItem("isTotpEnabled");
+    
     if (storedToken && storedUser) {
-      token = storedToken;
       currentUser = storedUser;
-      if (storedTotp === "true") isTotpEnabled = true;
       isAuthenticated = true;
+      currentScreen = "chat";
+      connectWebSocket();
+      fetchProfile();
     }
   });
+
+  function goTo(screen) {
+    if (screen === 'edit_profile') {
+      profileDraft = { ...profileData };
+      selectedImageFile = null;
+    }
+    currentScreen = screen;
+    errorMessage = "";
+    successMessage = "";
+  }
 
   $: if (isAuthenticated && !ws) {
     connectWebSocket();
   }
 
   function connectWebSocket() {
-    const wsUrl = `ws://localhost:8000/ws/chat?token=${token}`;
+    const wsUrl = `ws://172.20.10.2:8000/ws/chat?token=${token}`;
     ws = new WebSocket(wsUrl);
 
     ws.onmessage = (event) => {
@@ -132,6 +296,7 @@
 
   function toggleMode() {
     isLogin = !isLogin;
+    currentScreen = isLogin ? "login" : "register";
     username = "";
     password = "";
     totpCode = "";
@@ -154,6 +319,7 @@
     errorMessage = "";
     successMessage = "";
     trustScore = 100.0;
+    currentScreen = "welcome";
     
     if (ws) {
       ws.close();
@@ -197,6 +363,7 @@
       localStorage.setItem("username", currentUser);
       localStorage.setItem("isTotpEnabled", isTotpEnabled.toString());
       isAuthenticated = true;
+      currentScreen = "chat";
       
     } catch (error) {
       errorMessage = "Network error. Please try again.";
@@ -268,236 +435,229 @@
   }
 </script>
 
-<main class="min-h-screen flex items-center justify-center bg-base-200">
-  {#if !isAuthenticated}
-  <div class="card w-full max-w-sm shadow-2xl bg-base-100">
-    <div class="card-body">
-      <h2 class="card-title text-2xl justify-center font-bold mb-4">
-        {isLogin ? 'Login to Stylometry' : 'Create Account'}
-      </h2>
-      
+<main class="min-h-screen flex items-center justify-center bg-gray-100 p-4 font-sans">
+  {#if currentScreen === 'welcome'}
+    <!-- register1 mock-up -->
+    <div class="relative w-full max-w-4xl bg-white rounded-3xl shadow-2xl p-8 pt-12 overflow-hidden flex flex-col items-center animate-in fade-in zoom-in duration-300">
+      <div class="w-full mb-6"></div>
+
+      <h1 class="text-4xl font-bold text-[#205267] tracking-tight">StyloSense</h1>
+      <p class="text-gray-400 mt-2 text-sm italic">Login or signup to continue</p>
+
+      <div class="relative my-12 w-64 h-64 flex items-center justify-center">
+        <img src="/assets/welcome_cloud.png" alt="Welcome Character" class="w-full h-full object-contain" />
+      </div>
+
+      <div class="w-full space-y-4 mt-8">
+        <button on:click={() => { isLogin = false; goTo('register'); }} class="w-full py-4 bg-[#539BB8] text-white font-bold rounded-2xl hover:bg-[#458caf] active:scale-[0.98] transition-all shadow-lg shadow-blue-50/50">
+          Create account
+        </button>
+        <button on:click={() => { isLogin = true; goTo('login'); }} class="w-full py-4 bg-[#7BB2C7] text-white font-bold rounded-2xl hover:bg-[#6aa4b9] active:scale-[0.98] transition-all shadow-lg shadow-blue-50/50">
+          Already have an account
+        </button>
+      </div>
+    </div>
+
+  {:else if currentScreen === 'login' || currentScreen === 'register'}
+    <!-- Login/Register Screen -->
+    <div class="relative w-full max-w-2xl bg-white rounded-3xl shadow-2xl p-8 pt-12 overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-300">
+
+
+      <div class="mt-12">
+        <h2 class="text-3xl font-bold text-[#205267]">
+          {isLogin ? 'Login account' : 'Create account'}
+        </h2>
+        <p class="text-gray-400 mt-2">
+          {isLogin ? 'Welcome back!' : 'Sign up to continue'}
+        </p>
+      </div>
+
       {#if errorMessage}
-        <div class="alert alert-error text-sm mb-4">
-          <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+        <div class="mt-6 p-4 bg-red-50 text-red-600 rounded-2xl text-sm flex items-center gap-2">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>
           <span>{errorMessage}</span>
         </div>
       {/if}
 
-      <form on:submit={handleSubmit} novalidate>
-        <div class="form-control mb-4">
-          <label class="label" for="username">
-            <span class="label-text">Username</span>
-          </label>
-          <input 
-            type="text" 
-            id="username"
-            placeholder="johndoe" 
-            class="input input-bordered w-full" 
-            bind:value={username}
-            required
-            pattern="[a-zA-Z0-9_]+"
-            minlength="3"
-            maxlength="20"
-          />
-        </div>
-        
-        <div class="form-control mb-4">
-          <label class="label" for="password">
-            <span class="label-text">Password</span>
-          </label>
-          <input 
-            type="password" 
-            id="password"
-            placeholder="••••••••" 
-            class="input input-bordered w-full" 
-            bind:value={password}
-            required
-            minlength="6"
-          />
-        </div>
-
-        <!-- Optional 2FA code field only shown in Login Mode -->
-        {#if isLogin}
-          <div class="form-control mb-6">
-            <label class="label" for="totpCode">
-              <span class="label-text">2FA Code (if enabled)</span>
-            </label>
+      <form on:submit={handleSubmit} class="mt-8 space-y-6" novalidate>
+        <div class="space-y-2">
+          <label class="block text-sm font-medium text-gray-500 ml-1" for="username">Username</label>
+          <div class="relative flex items-center">
+            <span class="absolute left-4 text-gray-400">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            </span>
             <input 
               type="text" 
+              id="username"
+              placeholder="Username" 
+              class="w-full pl-12 pr-4 py-4 bg-gray-50/50 border border-gray-100 rounded-2xl focus:ring-2 focus:ring-[#539BB8] focus:border-transparent outline-none transition-all"
+              bind:value={username}
+              required
+            />
+          </div>
+        </div>
+
+        <div class="space-y-2">
+          <label class="block text-sm font-medium text-gray-500 ml-1" for="password">Password</label>
+          <div class="relative flex items-center">
+            <span class="absolute left-4 text-gray-400">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+            </span>
+            <input 
+              type={showPassword ? "text" : "password"} 
+              id="password"
+              placeholder="Password"
+              class="w-full pl-12 pr-12 py-4 bg-gray-50/50 border border-gray-100 rounded-2xl focus:ring-2 focus:ring-[#539BB8] focus:border-transparent outline-none transition-all"
+              value={password}
+              on:input={(e) => password = e.target.value}
+              required
+            />
+            <button type="button" class="absolute right-4 text-gray-400 hover:text-gray-600 focus:outline-none" on:click={() => showPassword = !showPassword}>
+              {#if showPassword}
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+              {:else}
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg>
+              {/if}
+            </button>
+          </div>
+        </div>
+
+        {#if isLogin}
+        <div class="space-y-2">
+          <label class="block text-sm font-medium text-gray-500 ml-1" for="totpCode">2FA Code (Optional)</label>
+          <div class="relative flex items-center">
+            <span class="absolute left-4 text-gray-400">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/></svg>
+            </span>
+            <input 
+              type={showTotpCode ? "text" : "password"} 
               id="totpCode"
               placeholder="123456" 
-              class="input input-bordered w-full" 
-              bind:value={totpCode}
+              class="w-full pl-12 pr-12 py-4 bg-gray-50/50 border border-gray-100 rounded-2xl focus:ring-2 focus:ring-[#539BB8] focus:border-transparent outline-none transition-all"
+              value={totpCode}
+              on:input={(e) => totpCode = e.target.value}
               maxlength="6"
               inputmode="numeric"
             />
+            <button type="button" class="absolute right-4 text-gray-400 hover:text-gray-600 focus:outline-none" on:click={() => showTotpCode = !showTotpCode}>
+              {#if showTotpCode}
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+              {:else}
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg>
+              {/if}
+            </button>
           </div>
-        {:else}
-          <div class="mb-6"></div>
+        </div>
         {/if}
-        
-        <div class="form-control mt-2">
-          <button type="submit" class="btn btn-primary w-full">
-            {isLogin ? 'Sign In' : 'Sign Up'}
+
+        <div class="pt-4">
+          <button 
+            type="submit" 
+            class="w-full py-4 bg-[#539BB8] text-white font-bold rounded-2xl hover:bg-[#458caf] active:scale-[0.98] transition-all"
+          >
+            {isLogin ? 'Login' : 'Create account'}
           </button>
         </div>
       </form>
-      
-      <div class="divider">OR</div>
-      
-      <div class="text-center mt-2">
-        <button class="btn btn-link text-sm" on:click={toggleMode}>
-          {isLogin ? "Don't have an account? Register" : 'Already have an account? Login'}
-        </button>
+
+      <div class="mt-8 text-center">
+        <p class="text-gray-400 text-sm">
+          {isLogin ? "Don't have an account?" : "Already have an account?"}
+          <button on:click={toggleMode} class="font-bold text-[#205267]">
+            {isLogin ? 'Sign up' : 'Login'}
+          </button>
+        </p>
       </div>
     </div>
-  </div>
-  {:else}
-  <div class="w-full h-screen flex flex-col bg-base-200">
-    <div class="navbar bg-base-100 shadow-sm px-4 shrink-0">
-      <div class="flex-1">
-        <a href="/" class="btn btn-ghost text-xl">Stylometry Chat</a>
-      </div>
-      <div class="flex-none gap-2 flex items-center">
-        <!-- Security Enforcement Toggle -->
-        <label class="swap swap-flip mr-4 text-xs font-semibold cursor-pointer">
-          <input type="checkbox" bind:checked={securityEnforcement} />
-          <div class="swap-on text-error">Security: ON</div>
-          <div class="swap-off opacity-40">Security: OFF</div>
-        </label>
 
-        <!-- Status Feedback -->
-        <div class="hidden md:block mr-4 text-[10px] uppercase tracking-tighter font-bold">
-          {#if securityEnforcement}
-            <span class="text-error animate-pulse">● Status: Active Protection</span>
-          {:else}
-            <span class="text-base-content opacity-40">○ Status: Monitoring Disabled (Data Collection Mode)</span>
-          {/if}
+  {:else if currentScreen === 'chat'}
+    <!-- Existing Chat UI with a Profile Button -->
+    <div class="w-full h-screen flex flex-col bg-base-200">
+      <div class="navbar bg-base-100 shadow-sm px-4 shrink-0">
+        <div class="flex-1">
+          <a href="/" class="btn btn-ghost text-xl text-[#205267] font-bold">Stylometry Chat</a>
         </div>
+        <div class="flex-none gap-2 flex items-center">
+          <label class="swap swap-flip mr-4 text-xs font-semibold cursor-pointer">
+            <input type="checkbox" bind:checked={securityEnforcement} />
+            <div class="swap-on text-error">Security: ON</div>
+            <div class="swap-off opacity-40">Security: OFF</div>
+          </label>
 
-        <!-- Debug Toggle -->
-        <label class="swap swap-flip mr-4 text-xs font-semibold cursor-pointer">
-          <input type="checkbox" bind:checked={showDebug} />
-          <div class="swap-on text-primary">Debug: ON</div>
-          <div class="swap-off opacity-40">Debug: OFF</div>
-        </label>
-        
-        {#if showDebug}
-          <div class="radial-progress text-sm mr-4 {trustScore > 80 ? 'text-success' : trustScore > 40 ? 'text-warning' : 'text-error'}" style="--value:{trustScore}; --size:3rem; --thickness: 4px;" role="progressbar">{Math.round(trustScore)}</div>
-        {/if}
-
-        <span class="text-sm font-semibold mr-2">Welcome, {currentUser}</span>
-        <button class="btn btn-outline btn-error btn-sm" on:click={logout}>
-          Logout
-        </button>
-      </div>
-    </div>
-    
-    <div class="flex-1 flex flex-col lg:flex-row gap-6 p-6 overflow-hidden">
-      <!-- Main Dashboard Chat Interface -->
-      <div class="flex-1 flex flex-col bg-base-100 shadow-xl rounded-box overflow-hidden h-full">
-        <div class="bg-base-200 p-4 font-bold border-b border-base-300">
-          Tester Bot Chamber
-        </div>
-        
-        <div class="flex-1 p-4 overflow-y-auto" bind:this={chatContainer}>
-          {#if messages.length === 0}
-            <div class="text-center text-base-content/50 mt-10">
-              <p>Welcome to Thai Stylometry Chat!</p>
-              <p class="text-sm">Say hello to the Tester Bot...</p>
-            </div>
-          {/if}
-          
-          {#each messages as msg}
-            <div class="chat {msg.sender === currentUser ? 'chat-end' : 'chat-start'}">
-              <div class="chat-header text-xs opacity-50 mb-1">
-                {msg.sender}
-              </div>
-              <div class="chat-bubble {msg.sender === currentUser ? 'chat-bubble-primary' : 'chat-bubble-secondary'}">
-                {msg.text}
+          <button class="btn btn-ghost btn-circle" on:click={() => goTo('profile')}>
+            <div class="avatar">
+              <div class="w-8 rounded-full border border-blue-50 bg-gray-100 overflow-hidden">
+                {#if profileData.avatar_url}
+                  <img src={getAvatarUrl(profileData.avatar_url)} alt="User Avatar" />
+                {/if}
               </div>
             </div>
-          {/each}
-        </div>
-        
-        <div class="p-4 bg-base-200 border-t border-base-300 flex gap-2">
-          <input 
-            type="text" 
-            class="input input-bordered flex-1" 
-            placeholder="Type a message..." 
-            bind:value={chatInput}
-            on:keydown={handleChatKeydown}
-          />
-          <button class="btn btn-primary" on:click={sendChatMessage}>Send</button>
+          </button>
+
+          <span class="text-sm font-semibold hidden md:block">@{currentUser}</span>
         </div>
       </div>
       
-      <!-- Security Settings Panel -->
-      <div class="card w-full lg:w-96 bg-base-100 shadow-xl h-fit shrink-0">
-        <div class="card-body">
-          <h2 class="card-title text-xl border-b pb-2 mb-4">Security Settings</h2>
+      <div class="flex-1 flex flex-col lg:flex-row gap-6 p-6 overflow-hidden">
+        <div class="flex-1 flex flex-col bg-base-100 shadow-xl rounded-[32px] overflow-hidden h-full border border-white">
+          <div class="bg-gray-50/50 p-4 font-bold border-b border-gray-100 flex items-center justify-between">
+            <span class="text-[#205267]">Tester Bot Chamber</span>
+            {#if showDebug}
+              <div class="flex items-center gap-2">
+                <span class="text-[10px] text-gray-400 uppercase tracking-widest">Trust</span>
+                <div class="radial-progress text-[10px] {trustScore > 80 ? 'text-success' : trustScore > 40 ? 'text-warning' : 'text-error'}" style="--value:{trustScore}; --size:2rem; --thickness: 3px;" role="progressbar">{Math.round(trustScore)}</div>
+              </div>
+            {/if}
+          </div>
           
-          {#if successMessage}
-            <div class="alert alert-success text-sm mb-4">
-              <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-              <span>{successMessage}</span>
-            </div>
-          {/if}
-
-          {#if errorMessage}
-            <div class="alert alert-error text-sm mb-4">
-              <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-              <span>{errorMessage}</span>
-            </div>
-          {/if}
-
-          {#if isTotpEnabled}
-             <div class="alert alert-success text-sm mb-4">
-              <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-              <span>✅ 2FA is securely enabled for your account.</span>
-            </div>
-          {:else if !isSettingUpTOTP}
-            <p class="text-sm text-base-content/80 mb-4">Protect your account with Two-Factor Authentication (2FA).</p>
-            <button class="btn btn-outline btn-primary w-full" on:click={generateTOTP}>
-              Enable 2FA
-            </button>
-          {:else}
-            <div class="flex flex-col items-center">
-              <p class="text-sm font-semibold mb-2">1. Scan QR Code</p>
-              {#if qrCodeBase64}
-                <div class="bg-white p-2 rounded-lg mb-2">
-                  <img src="data:image/png;base64,{qrCodeBase64}" alt="TOTP QR Code" class="w-48 h-48" />
+          <div class="flex-1 p-4 overflow-y-auto space-y-4" bind:this={chatContainer}>
+            {#each messages as msg}
+              <div class="chat {msg.sender === currentUser ? 'chat-end' : 'chat-start'}">
+                <div class="chat-bubble {msg.sender === currentUser ? 'bg-[#539BB8] text-white' : 'bg-gray-100 text-gray-700'} rounded-2xl shadow-sm border-none">
+                  {msg.text}
                 </div>
-              {:else}
-                <span class="loading loading-spinner text-primary my-4"></span>
-              {/if}
-              <p class="text-xs text-base-content/60 mb-4">Secret: {totpSecretText}</p>
-              
-              <div class="w-full divider my-2"></div>
-              
-              <p class="text-sm font-semibold mb-2 w-full text-left">2. Verify & Save</p>
-              <div class="form-control w-full">
-                <input 
-                  type="text" 
-                  placeholder="Enter 6-digit code" 
-                  class="input input-sm input-bordered w-full mb-3 text-center tracking-widest text-lg" 
-                  bind:value={setupTotpCode}
-                  pattern="[0-9]{6}"
-                  maxlength="6"
-                  inputmode="numeric"
-                />
-                <button class="btn btn-success btn-sm w-full" on:click={verifyTOTP} disabled={setupTotpCode.length !== 6}>
-                  Verify & Save
-                </button>
-                <button class="btn btn-ghost btn-sm w-full mt-2" on:click={() => {isSettingUpTOTP = false; qrCodeBase64 = "";}}>
-                  Cancel
-                </button>
               </div>
-            </div>
-          {/if}
+            {/each}
+          </div>
+          
+          <div class="p-4 bg-gray-50/50 border-t border-gray-100 flex gap-2">
+            <input 
+              type="text" 
+              class="input bg-white border-gray-100 rounded-2xl flex-1 focus:outline-[#539BB8]" 
+              placeholder="Type a message..." 
+              bind:value={chatInput}
+              on:keydown={handleChatKeydown}
+            />
+            <button class="btn bg-[#539BB8] hover:bg-[#458caf] text-white border-none rounded-2xl px-6" on:click={sendChatMessage}>Send</button>
+          </div>
         </div>
       </div>
     </div>
-  </div>
+
+  {:else if currentScreen === 'profile'}
+    <!-- profile mock-up (Settings) -->
+    <div class="relative w-full max-w-2xl bg-white rounded-3xl shadow-2xl p-8 pt-12 overflow-hidden flex flex-col animate-in fade-in slide-in-from-right-4 duration-300">
+      <div class="w-full flex items-center mb-8">
+        <span class="ml-0 font-bold text-gray-700">Setting</span>
+      </div>
+
+      <p class="text-gray-400 text-sm italic mb-8">@{profileData.username || currentUser}</p>
+      
+      <div class="mt-auto pt-8">
+        <button on:click={logout} class="w-full flex items-center p-4 bg-gray-50/80 hover:bg-white rounded-2xl transition-all group">
+          <span class="text-gray-600 font-medium flex-1 text-left group-hover:text-red-500">Logout</span>
+          <svg class="text-gray-300 group-hover:text-red-300 transition-colors" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+        </button>
+      </div>
+    </div>
+
+  {:else if currentScreen === 'edit_profile'}
+    <!-- edit profile mock-up -->
+    <div class="relative w-full max-w-4xl bg-white rounded-3xl shadow-2xl p-8 pt-12 overflow-hidden flex flex-col animate-in fade-in slide-in-from-right-4 duration-300 min-h-[40vh] items-center justify-center">
+      <h2 class="text-2xl font-bold text-[#205267]">@{profileData.username || currentUser}</h2>
+      <button on:click={() => goTo('profile')} class="mt-8 px-12 py-3 bg-gray-100 text-gray-600 font-bold rounded-2xl hover:bg-gray-200 transition-all">
+        Back to Settings
+      </button>
+    </div>
   {/if}
 </main>
