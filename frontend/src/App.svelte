@@ -144,7 +144,6 @@
       ws = null;
     }
     messages = [];
-    trustScore = 100.0;
     fetchChatHistory($selectedChatId);
     connectWebSocket($selectedChatId);
     currentWsId = $selectedChatId;

@@ -28,6 +28,8 @@ class ConnectionManager:
     def __init__(self) -> None:
         # { chat_id: { username: WebSocket } }
         self.active_rooms: Dict[int, Dict[str, WebSocket]] = {}
+        # Global state: { username: trust_score }
+        self.user_trust_scores: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -112,6 +114,19 @@ class ConnectionManager:
     def total_connections(self) -> int:
         """Return the total number of active WebSocket connections across all rooms."""
         return sum(len(room) for room in self.active_rooms.values())
+
+    # ------------------------------------------------------------------
+    # Global Trust State
+    # ------------------------------------------------------------------
+
+    def get_user_trust_score(self, username: str) -> float:
+        """Return the global trust score for *username*, defaulting to 100.0."""
+        return self.user_trust_scores.get(username, 100.0)
+
+    def update_user_trust_score(self, username: str, score: float) -> None:
+        """Update the global trust score for *username*."""
+        self.user_trust_scores[username] = score
+        print(f"[WS] Global trust update for {username} → {score:.2f}")
 
     def __repr__(self) -> str:  # pragma: no cover
         summary = {cid: list(users) for cid, users in self.active_rooms.items()}

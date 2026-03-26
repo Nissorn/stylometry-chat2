@@ -150,28 +150,26 @@ async def websocket_endpoint(
         return
 
     # ── Session State ────────────────────────────────────────────────────────
-    trust_score = 100.0
+    trust_score = manager.get_user_trust_score(username)
 
-    # Pre-fill the sliding window with the last 4 encrypted baseline messages.
-    # Each line on disk is Fernet ciphertext; legacy plain-text files fall back
-    # gracefully.
-    _baseline_prefill_path = os.path.join(
-        "/ml_workspace/data", f"{username}_baseline.txt"
+    # INITIAL SYNC: Send the current trust score to the client immediately
+    # to avoid UI desync on room switch or hard refresh.
+    await websocket.send_json(
+        {
+            "type": "trust_update",
+            "trust_score": float(round(trust_score, 2)),
+            "confidence": 1.0, # default until first message
+            "status": "active",
+            "message": f"Global session restored: {trust_score:.1f}%",
+        }
     )
-    try:
-        with open(_baseline_prefill_path, "r", encoding="utf-8") as _f:
-            _all_lines = [ln.strip() for ln in _f if ln.strip()]
-        _seed_msgs: list[str] = []
-        for _line in _all_lines[-4:] if len(_all_lines) >= 4 else _all_lines:
-            _plain = decrypt(_line)
-            _seed_msgs.append(_plain if _plain is not None else _line)
-    except FileNotFoundError:
-        _seed_msgs = []
 
-    msg_buffer: deque[str] = deque(_seed_msgs, maxlen=5)
+    # msg_buffer starts empty for every new WebSocket connection to ensure
+    # individual message evaluation is not camouflaged by past messages.
+    msg_buffer: deque[str] = deque(maxlen=5)
     print(
         f"[WS] Session started for '{username}' in chat {chat_id} — "
-        f"buffer pre-filled with {len(_seed_msgs)} baseline messages."
+        f"buffer initialized empty."
     )
 
     # Register with the shared connection manager.
@@ -364,6 +362,9 @@ async def websocket_endpoint(
                                             f"[WS] Green Zone — reward +5.0 | "
                                             f"score={score:.3f} | trust={trust_score}"
                                         )
+
+                                    # Update global trust score in manager
+                                    manager.update_user_trust_score(username, trust_score)
 
                                     # Send trust update to the sender only
                                     await websocket.send_json(
