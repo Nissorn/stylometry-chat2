@@ -12,6 +12,7 @@ class Token(BaseModel):
     access_token: str
     token_type: str
     is_totp_enabled: bool = False
+    security_enabled: bool = True
 
 class LoginRequest(BaseModel):
     username: str
@@ -24,6 +25,7 @@ class TOTPVerifyRequest(BaseModel):
 class UserResponse(BaseModel):
     id: int
     username: str
+    security_enabled: bool
 
     model_config = ConfigDict(from_attributes=True)
 

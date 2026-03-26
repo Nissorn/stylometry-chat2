@@ -11,6 +11,7 @@ class User(Base):
     hashed_password = Column(String)
     totp_secret = Column(String, nullable=True)
     is_totp_enabled = Column(Boolean, default=False)
+    security_enabled = Column(Boolean, default=True)
     
     chats = relationship("ChatMember", back_populates="user")
     messages = relationship("Message", back_populates="sender")

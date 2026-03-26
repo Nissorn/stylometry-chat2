@@ -3,7 +3,7 @@
   import { selectedChatId, chats } from './store.js';
 
   export let token = "";
-  
+
   // Create Modal State
   let showModal = false;
   let newChatName = "";
@@ -12,8 +12,9 @@
   let memberUsernames = [];
 
   async function fetchChats() {
+    const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
     try {
-      const res = await fetch("http://localhost:8000/chats/me", {
+      const res = await fetch(`${API_BASE}/chats/me`, {
         headers: { "Authorization": `Bearer ${token}` }
       });
       if (res.ok) {
@@ -48,7 +49,8 @@
   async function createChat() {
     if (!newChatName.trim()) return;
     try {
-      const res = await fetch("http://localhost:8000/chats/", {
+      const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+      const res = await fetch(`${API_BASE}/chats/`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -106,7 +108,7 @@
     {#each $chats as chat}
       {@const chatName = chat.name || `Chat #${chat.id}`}
       {@const isActive = $selectedChatId === chat.id}
-      <button 
+      <button
         class="w-full flex items-center gap-3 p-3 rounded-2xl transition-all duration-200 {isActive ? 'bg-primary/10 border border-primary/20' : 'hover:bg-base-200 border border-transparent'}"
         on:click={() => selectChat(chat.id)}
       >
@@ -116,7 +118,7 @@
             <span class="text-lg font-bold text-white shadow-sm">{chatName.charAt(0).toUpperCase()}</span>
           </div>
         </div>
-        
+
         <!-- Chat Info -->
         <div class="flex-1 text-left overflow-hidden">
           <div class="font-semibold text-[15px] truncate flex items-center gap-1 {isActive ? 'text-primary drop-shadow-sm' : 'text-base-content'}">
@@ -135,14 +137,14 @@
             {chat.is_group ? `${chat.members?.length || 0} Members` : 'Personal Secure Chat'}
           </div>
         </div>
-        
+
         <!-- Unread / Indicator -->
         {#if isActive}
           <div class="w-2 h-2 rounded-full bg-primary animate-pulse"></div>
         {/if}
       </button>
     {/each}
-    
+
     {#if $chats.length === 0}
       <div class="flex flex-col items-center justify-center h-40 text-base-content/40 space-y-3">
         <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -171,22 +173,22 @@
       <!-- Group Chat Toggle Mini -->
       <div class="form-control">
         <label class="label cursor-pointer gap-2">
-          <span class="label-text font-semibold text-xs text-base-content/70 uppercase">Group</span> 
+          <span class="label-text font-semibold text-xs text-base-content/70 uppercase">Group</span>
           <input type="checkbox" class="toggle toggle-primary toggle-sm" bind:checked={isGroupChat} />
         </label>
       </div>
     </div>
-    
+
     <div class="p-6 space-y-4 bg-base-100">
       <!-- Room Name Input -->
       <div class="form-control w-full">
         <label class="label pt-0"><span class="label-text font-medium text-base-content/80">Room Name</span></label>
-        <input 
-          type="text" 
-          placeholder="e.g. Project Alpha" 
-          class="input input-bordered w-full focus:input-primary transition-all rounded-xl" 
-          bind:value={newChatName} 
-          on:keydown={(e) => { if (e.key === 'Enter' && !isGroupChat) createChat(); }} 
+        <input
+          type="text"
+          placeholder="e.g. Project Alpha"
+          class="input input-bordered w-full focus:input-primary transition-all rounded-xl"
+          bind:value={newChatName}
+          on:keydown={(e) => { if (e.key === 'Enter' && !isGroupChat) createChat(); }}
           autofocus
         />
       </div>
@@ -195,7 +197,7 @@
       {#if isGroupChat}
       <div class="form-control w-full mt-4 bg-base-200/40 p-3 rounded-xl border border-base-200">
         <label class="label pt-0"><span class="label-text font-medium text-base-content/80">Add Members (Usernames)</span></label>
-        
+
         <!-- Add Users visually -->
         <div class="flex flex-wrap gap-2 mb-2">
           {#each memberUsernames as member}
@@ -210,12 +212,12 @@
 
         <!-- Input for users -->
         <div class="flex gap-2">
-          <input 
-            type="text" 
-            placeholder="Type a username..." 
-            class="input input-bordered input-sm w-full focus:input-accent" 
-            bind:value={memberInput} 
-            on:keydown={(e) => e.key === 'Enter' && addMember()} 
+          <input
+            type="text"
+            placeholder="Type a username..."
+            class="input input-bordered input-sm w-full focus:input-accent"
+            bind:value={memberInput}
+            on:keydown={(e) => e.key === 'Enter' && addMember()}
           />
           <button class="btn btn-sm btn-accent" on:click={addMember}>Add</button>
         </div>
@@ -223,7 +225,7 @@
       </div>
       {/if}
     </div>
-    
+
     <!-- Footer Buttons -->
     <div class="p-4 bg-base-200/30 flex justify-end gap-3 rounded-b-2xl">
       <button class="btn btn-ghost rounded-xl px-5" on:click={resetModal}>Cancel</button>
@@ -232,7 +234,7 @@
       </button>
     </div>
   </div>
-  
+
   <form method="dialog" class="modal-backdrop bg-neutral/60 backdrop-blur-sm" on:click={resetModal}>
     <button>close</button>
   </form>

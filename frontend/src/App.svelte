@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import Sidebar from './Sidebar.svelte';
   import { selectedChatId } from './store.js';
   import { chats } from './store.js';
@@ -8,7 +8,7 @@
   let showMemberModal = false;
   let newMemberUsername = "";
 
-  
+
   async function leaveChat() {
     if(!confirm('Are you sure you want to leave this group?')) return;
     try {
@@ -112,13 +112,18 @@
   let chatInput = "";
   let ws = null;
   let chatContainer;
-  
+  let isLoadingHistory = false;
+
   // Trust State
   let trustScore = 100.0;
   let showDebug = false;
   let securityEnforcement = true;
 
-  const API_BASE = "http://localhost:8000";
+  // API and WebSocket base URLs — configurable via Vite environment variables.
+  // Set VITE_API_BASE and VITE_WS_BASE in your .env file or Docker Compose
+  // environment for production deployments (e.g. http://your-droplet-ip:8000).
+  const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+  const WS_BASE  = import.meta.env.VITE_WS_BASE  || "ws://localhost:8000";
 
   onMount(() => {
     const storedToken = localStorage.getItem("token");
@@ -147,38 +152,78 @@
 
   async function fetchChatHistory(chatId) {
     if (!chatId) return;
+    isLoadingHistory = true;
     try {
       const res = await fetch(`${API_BASE}/chats/${chatId}/messages`, {
-         headers: { "Authorization": `Bearer ${token}` }
+        headers: { "Authorization": `Bearer ${token}` }
       });
       if (res.ok) {
-         const rawMessages = await res.json();
-         messages = rawMessages.map(m => ({ 
-             sender: m.sender_username, 
-             text: m.text, 
-             timestamp: m.timestamp 
-         }));
-         scrollToBottom();
+        const rawMessages = await res.json();
+        // Backend guarantees ascending timestamp order — map directly to render format.
+        messages = rawMessages.map(m => ({
+          sender: m.sender_username,
+          text: m.text,
+          timestamp: m.timestamp
+        }));
+        scrollToBottom();
+      } else {
+        console.error(`[History] Fetch failed: HTTP ${res.status}`);
+        messages = [];
       }
-    } catch(e) {}
+    } catch (e) {
+      console.error("[History] Network error:", e);
+      messages = [];
+    } finally {
+      isLoadingHistory = false;
+    }
   }
 
   function connectWebSocket(chatId) {
     if (!chatId) return;
-    const wsUrl = `ws://localhost:8000/ws/chat/${chatId}?token=${token}`;
+    const wsUrl = `${WS_BASE}/ws/chat/${chatId}?token=${token}`;
     ws = new WebSocket(wsUrl);
 
     ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch {
+        console.warn("[WS] Non-JSON message received:", event.data);
+        return;
+      }
+
       if (data.type === "chat") {
-        // Broadcast format: {type:"chat", sender:username, message:text, is_broadcast:true}
-        // Legacy echo format: {type:"chat", sender:"me"/"bot", text:...}
+        // Broadcast: { type:"chat", sender, message, is_broadcast:true }
+        // Legacy echo: { type:"chat", sender, text }
         const text = data.is_broadcast ? data.message : (data.text || data.message || "");
         messages = [...messages, { sender: data.sender, text, timestamp: new Date().toISOString() }];
         scrollToBottom();
+
       } else if (data.type === "trust_update") {
         trustScore = data.trust_score;
-      } else if (data.sender && (data.text || data.message)) { // fallback
+
+      } else if (data.type === "group_updated") {
+        // ── Bug Fix: Reactive Group Sync ──────────────────────────────────
+        // Server broadcasts this after every add_member / remove_member REST
+        // call. Update the chats store in-place so the member badge, the
+        // manage-members modal, and the activeChat derived value all re-render
+        // without a page reload.
+        const updatedId = data.chat_id;
+        const updatedMembers = data.members || [];
+        chats.update(list =>
+          list.map(c => c.id === updatedId ? { ...c, members: updatedMembers } : c)
+        );
+
+        // If the current user was just kicked from THIS room, close gracefully
+        // and navigate back to the chat list.
+        if (data.kicked_user && data.kicked_user === currentUser && updatedId === chatId) {
+          console.warn("[WS] You were removed from this group.");
+          if (ws) { ws.close(); ws = null; }
+          selectedChatId.set(null);
+        }
+
+      } else if (data.sender && (data.text || data.message)) {
+        // Fallback for legacy server messages
         const text = data.message || data.text;
         messages = [...messages, { sender: data.sender, text, timestamp: new Date().toISOString() }];
         scrollToBottom();
@@ -187,15 +232,18 @@
 
     const thisWs = ws;
     thisWs.onclose = (event) => {
-      console.log("WebSocket Disconnected", event.code);
-      // Only set ws to null if the active global ws is still THIS socket.
-      // This prevents race conditions when switching chats rapidly.
+      console.log("[WS] Disconnected. Code:", event.code);
+      // Guard against race conditions when the user switches chats rapidly.
       if (ws === thisWs) {
         ws = null;
       }
       if (event.code === 4001) {
         forceLockout();
       }
+    };
+
+    thisWs.onerror = (event) => {
+      console.error("[WS] Socket error:", event);
     };
   }
 
@@ -213,17 +261,17 @@
     setupTotpCode = "";
     messages = [];
     trustScore = 100.0;
-    
+
     if (ws) {
       ws.close();
       ws = null;
     }
-    
+
     isLogin = true;
     errorMessage = "Session locked due to unusual typing behavior. Please re-authenticate.";
     successMessage = "";
   }
-  
+
   function sendChatMessage() {
     if (ws && chatInput.trim() !== "") {
       const payload = {
@@ -244,12 +292,11 @@
 
     $: messages, scrollToBottom();
 
-  function scrollToBottom() {
-    setTimeout(() => {
-      if (chatContainer) {
-        chatContainer.scrollTop = chatContainer.scrollHeight;
-      }
-    }, 50);
+  async function scrollToBottom() {
+    await tick(); // flush Svelte DOM updates before measuring scroll height
+    if (chatContainer) {
+      chatContainer.scrollTop = chatContainer.scrollHeight;
+    }
   }
 
   function toggleMode() {
@@ -276,7 +323,7 @@
     errorMessage = "";
     successMessage = "";
     trustScore = 100.0;
-    
+
     if (ws) {
       ws.close();
       ws = null;
@@ -288,11 +335,11 @@
     event.preventDefault();
     errorMessage = "";
     successMessage = "";
-    
+
     const endpoint = isLogin ? "/auth/login" : "/auth/register";
     const payload = { username, password };
     if (isLogin && totpCode) payload.totp_code = totpCode;
-    
+
     try {
       const response = await fetch(`${API_BASE}${endpoint}`, {
         method: "POST",
@@ -301,25 +348,25 @@
         },
         body: JSON.stringify(payload)
       });
-      
+
       const data = await response.json();
-      
+
       if (!response.ok) {
         // FastAPI returns detail as Array of objects (422) or String (400)
         errorMessage = Array.isArray(data.detail) ? data.detail[0].msg : (data.detail || "Authentication failed");
         return;
       }
-      
+
       // Store on success
       token = data.access_token;
       currentUser = username;
       isTotpEnabled = data.is_totp_enabled || false;
-      
+
       localStorage.setItem("token", token);
       localStorage.setItem("username", currentUser);
       localStorage.setItem("isTotpEnabled", isTotpEnabled.toString());
       isAuthenticated = true;
-      
+
     } catch (error) {
       errorMessage = "Network error. Please try again.";
     }
@@ -329,7 +376,7 @@
     errorMessage = "";
     successMessage = "";
     isSettingUpTOTP = true;
-    
+
     try {
       const response = await fetch(`${API_BASE}/auth/totp/generate?username=${encodeURIComponent(currentUser)}`, {
         method: "POST",
@@ -338,7 +385,7 @@
         }
       });
       const data = await response.json();
-      
+
       if (response.ok) {
         qrCodeBase64 = data.qr_code;
         totpSecretText = data.secret;
@@ -353,7 +400,7 @@
   async function verifyTOTP() {
     errorMessage = "";
     successMessage = "";
-    
+
     try {
       const response = await fetch(`${API_BASE}/auth/totp/verify?username=${encodeURIComponent(currentUser)}`, {
         method: "POST",
@@ -363,19 +410,19 @@
         },
         body: JSON.stringify({ totp_code: setupTotpCode })
       });
-      
+
       const data = await response.json();
-      
+
       if (response.ok) {
         successMessage = "2FA Enabled Successfully!";
         isTotpEnabled = true;
         localStorage.setItem("isTotpEnabled", "true");
-        
+
         isSettingUpTOTP = false;
         qrCodeBase64 = "";
         totpSecretText = "";
         setupTotpCode = "";
-        
+
         // Optionally update token if a new one was issued
         if (data.access_token) {
           token = data.access_token;
@@ -397,7 +444,7 @@
       <h2 class="card-title text-2xl justify-center font-bold mb-4">
         {isLogin ? 'Login to Stylometry' : 'Create Account'}
       </h2>
-      
+
       {#if errorMessage}
         <div class="alert alert-error text-sm mb-4">
           <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
@@ -410,11 +457,11 @@
           <label class="label" for="username">
             <span class="label-text">Username</span>
           </label>
-          <input 
-            type="text" 
+          <input
+            type="text"
             id="username"
-            placeholder="johndoe" 
-            class="input input-bordered w-full" 
+            placeholder="johndoe"
+            class="input input-bordered w-full"
             bind:value={username}
             required
             pattern="[a-zA-Z0-9_]+"
@@ -422,16 +469,16 @@
             maxlength="20"
           />
         </div>
-        
+
         <div class="form-control mb-4">
           <label class="label" for="password">
             <span class="label-text">Password</span>
           </label>
-          <input 
-            type="password" 
+          <input
+            type="password"
             id="password"
-            placeholder="••••••••" 
-            class="input input-bordered w-full" 
+            placeholder="••••••••"
+            class="input input-bordered w-full"
             bind:value={password}
             required
             minlength="6"
@@ -444,11 +491,11 @@
             <label class="label" for="totpCode">
               <span class="label-text">2FA Code (if enabled)</span>
             </label>
-            <input 
-              type="text" 
+            <input
+              type="text"
               id="totpCode"
-              placeholder="123456" 
-              class="input input-bordered w-full" 
+              placeholder="123456"
+              class="input input-bordered w-full"
               bind:value={totpCode}
               maxlength="6"
               inputmode="numeric"
@@ -457,16 +504,16 @@
         {:else}
           <div class="mb-6"></div>
         {/if}
-        
+
         <div class="form-control mt-2">
           <button type="submit" class="btn btn-primary w-full">
             {isLogin ? 'Sign In' : 'Sign Up'}
           </button>
         </div>
       </form>
-      
+
       <div class="divider">OR</div>
-      
+
       <div class="text-center mt-2">
         <button class="btn btn-link text-sm" on:click={toggleMode}>
           {isLogin ? "Don't have an account? Register" : 'Already have an account? Login'}
@@ -503,7 +550,7 @@
           <div class="swap-on text-primary">Debug: ON</div>
           <div class="swap-off opacity-40">Debug: OFF</div>
         </label>
-        
+
         {#if showDebug}
           <div class="radial-progress text-sm mr-4 {trustScore > 80 ? 'text-success' : trustScore > 40 ? 'text-warning' : 'text-error'}" style="--value:{trustScore}; --size:3rem; --thickness: 4px;" role="progressbar">{Math.round(trustScore)}</div>
         {/if}
@@ -514,10 +561,10 @@
         </button>
       </div>
     </div>
-    
+
     <div class="flex-1 flex flex-col lg:flex-row gap-6 p-6 overflow-hidden">
       <Sidebar {token} />
-      
+
       <!-- Main Dashboard Chat Interface -->
       <div class="flex-1 flex flex-col bg-base-100 shadow-xl rounded-box overflow-hidden h-full">
         <div class="bg-base-200 p-4 border-b border-base-300 flex justify-between items-center z-10 shadow-sm">
@@ -539,7 +586,7 @@
                 </svg>
               </button>
             {/if}
-          
+
           {#if activeChat}
             <!-- 3 dots is already implemented -->
             <div class="dropdown dropdown-end">
@@ -557,20 +604,24 @@
           {/if}
           </div>
         </div>
-        
+
         {#if !$selectedChatId}
           <div class="flex-1 flex items-center justify-center text-base-content/50">
             Please select a chat room or create a new one from the sidebar.
           </div>
         {:else}
         <div class="flex-1 p-4 overflow-y-auto" bind:this={chatContainer}>
-          {#if messages.length === 0}
+          {#if isLoadingHistory}
+            <div class="flex items-center justify-center h-32">
+              <span class="loading loading-spinner loading-lg text-primary"></span>
+            </div>
+          {:else if messages.length === 0}
             <div class="text-center text-base-content/50 mt-10">
-              <p>Welcome to Thai Stylometry Chat!</p>
-              <p class="text-sm">Say hello to the Tester Bot...</p>
+              <p>Welcome to this chat!</p>
+              <p class="text-sm">No messages yet — be the first to send one!</p>
             </div>
           {/if}
-          
+
           {#each messages as msg}
             <div class="chat {msg.sender === currentUser ? 'chat-end' : 'chat-start'} mb-2">
               <div class="chat-header text-xs opacity-60 mb-1 font-semibold flex gap-2 items-center">
@@ -585,12 +636,12 @@
             </div>
           {/each}
         </div>
-        
+
         <div class="p-4 bg-base-200 border-t border-base-300 flex gap-2">
-          <input 
-            type="text" 
-            class="input input-bordered flex-1" 
-            placeholder="Type a message..." 
+          <input
+            type="text"
+            class="input input-bordered flex-1"
+            placeholder="Type a message..."
             bind:value={chatInput}
             on:keydown={handleChatKeydown}
           />
@@ -598,12 +649,12 @@
         </div>
         {/if}
       </div>
-      
+
       <!-- Security Settings Panel -->
       <div class="card w-full lg:w-96 bg-base-100 shadow-xl h-fit shrink-0">
         <div class="card-body">
           <h2 class="card-title text-xl border-b pb-2 mb-4">Security Settings</h2>
-          
+
           {#if successMessage}
             <div class="alert alert-success text-sm mb-4">
               <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
@@ -639,15 +690,15 @@
                 <span class="loading loading-spinner text-primary my-4"></span>
               {/if}
               <p class="text-xs text-base-content/60 mb-4">Secret: {totpSecretText}</p>
-              
+
               <div class="w-full divider my-2"></div>
-              
+
               <p class="text-sm font-semibold mb-2 w-full text-left">2. Verify & Save</p>
               <div class="form-control w-full">
-                <input 
-                  type="text" 
-                  placeholder="Enter 6-digit code" 
-                  class="input input-sm input-bordered w-full mb-3 text-center tracking-widest text-lg" 
+                <input
+                  type="text"
+                  placeholder="Enter 6-digit code"
+                  class="input input-sm input-bordered w-full mb-3 text-center tracking-widest text-lg"
                   bind:value={setupTotpCode}
                   pattern="[0-9]{6}"
                   maxlength="6"
@@ -683,7 +734,7 @@
           <input type="text" placeholder="Add Username..." class="input input-bordered w-full focus:input-accent" bind:value={newMemberUsername} on:keydown={(e) => e.key === 'Enter' && addGroupMember()}/>
           <button class="btn btn-accent px-6" on:click={addGroupMember} disabled={!newMemberUsername.trim()}>Add</button>
         </div>
-        
+
         <div class="text-sm font-semibold mb-2 text-base-content/80">Current Members ({activeChat.members.length})</div>
         <div class="space-y-2 max-h-60 overflow-y-auto">
           {#each activeChat.members as member}
@@ -703,4 +754,3 @@
   </dialog>
   {/if}
 </main>
-

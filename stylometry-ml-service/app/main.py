@@ -272,7 +272,9 @@ def predict(req: PredictRequest):
     print(f"DEBUG: Final Average Confidence Score for {req.username}: {confidence} | Latest: {latest_conf}")
     
     return {
-        "confidence_score": confidence, 
-        "latest_message_confidence": latest_conf,
+        "average_score": confidence, 
+        "latest_score": latest_conf,
+        "confidence_score": confidence,  # Legacy support
+        "latest_message_confidence": latest_conf, # Legacy support
         "status": "active"
     }

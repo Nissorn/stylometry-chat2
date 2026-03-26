@@ -1,38 +1,148 @@
-version: '3.8'
+version: "3.8"
+
+# =============================================================================
+# Thai-Stylometry Chat — Production Docker Compose
+# =============================================================================
+#
+# Required environment variables (set in .env or export before `docker compose up`):
+#
+#   JWT_SECRET_KEY   — Long random string for signing JWTs.
+#                      Generate: openssl rand -hex 32
+#
+#   ENCRYPTION_KEY   — Valid Fernet key for encrypting baseline data on disk.
+#                      Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+#
+# Optional (sensible defaults provided):
+#
+#   ALLOWED_ORIGINS  — Comma-separated list of allowed CORS origins.
+#                      e.g. http://your-droplet-ip:5173,https://yourdomain.com
+#                      Defaults to * (allow all) — OVERRIDE IN PRODUCTION.
+#
+#   VITE_API_BASE    — Full HTTP URL the browser uses to reach the backend API.
+#                      e.g. http://your-droplet-ip:8000
+#                      Defaults to http://localhost:8000
+#
+#   VITE_WS_BASE     — Full WS URL the browser uses for WebSocket connections.
+#                      e.g. ws://your-droplet-ip:8000
+#                      Defaults to ws://localhost:8000
+#
+# Data Persistence on DigitalOcean Droplet:
+#   - SQLite database  → bind-mounted at ./backend/app.db (never inside the container layer)
+#   - ML baseline txt  → bind-mounted at ./ml_workspace/data/
+#   - ML model artifacts → bind-mounted at ./ml_workspace/models/
+#   Both directories survive container restarts, image rebuilds, and droplet reboots
+#   because they live on the host filesystem, not in ephemeral container storage.
+#
+# =============================================================================
 
 services:
+  # ---------------------------------------------------------------------------
+  # Backend — FastAPI + SQLite + Fernet
+  # ---------------------------------------------------------------------------
   backend:
     build:
       context: ./backend
+    container_name: stylometry_backend
+    restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
+      # Source code (enables hot-reload in dev; remove in pure-prod builds)
       - ./backend:/app
+      # Shared ML workspace — persists across container restarts and reboots.
+      # The SQLite DB lives in ./backend/app.db (covered by the bind above).
+      # Baseline .txt files and trained model artifacts live here.
       - ./ml_workspace:/ml_workspace
     environment:
+      # ── Database ────────────────────────────────────────────────────────────
+      # sqlite:///./app.db resolves to /app/app.db inside the container.
+      # Because ./backend is bind-mounted to /app, the file is actually stored
+      # at ./backend/app.db on the host — fully persistent.
       - DATABASE_URL=sqlite:///./app.db
-      - SECRET_KEY=supersecret
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
+      # ── JWT Signing Secret (REQUIRED — app refuses to start if unset) ───────
+      # Supports both JWT_SECRET_KEY (canonical) and SECRET_KEY (legacy alias).
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?JWT_SECRET_KEY is required}
+
+      # ── Fernet Encryption Key (REQUIRED — app refuses to start if unset) ────
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
+
+      # ── CORS Allowed Origins ─────────────────────────────────────────────────
+      # Set to your Droplet's public IP / domain in production:
+      #   ALLOWED_ORIGINS=http://your-droplet-ip:5173,https://yourdomain.com
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-*}
+
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      - stylometry-ml-service
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # Frontend — SvelteKit / Vite Dev Server
+  # ---------------------------------------------------------------------------
   frontend:
     build:
       context: ./frontend
+    container_name: stylometry_frontend
+    restart: unless-stopped
     ports:
       - "5173:5173"
     volumes:
       - ./frontend:/app
+      # Prevent the host from shadowing the container's node_modules
       - /app/node_modules
+    environment:
+      # ── API & WebSocket base URLs ────────────────────────────────────────────
+      # Vite exposes VITE_* variables to the browser via import.meta.env.
+      # Set these to your Droplet's public IP or domain before deploying:
+      #   VITE_API_BASE=http://your-droplet-ip:8000
+      #   VITE_WS_BASE=ws://your-droplet-ip:8000
+      - VITE_API_BASE=${VITE_API_BASE:-http://localhost:8000}
+      - VITE_WS_BASE=${VITE_WS_BASE:-ws://localhost:8000}
     command: npm run dev -- --host 0.0.0.0
+    depends_on:
+      - backend
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:5173/" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
+  # ---------------------------------------------------------------------------
+  # Stylometry ML Microservice — FastAPI + PyTorch + XGBoost
+  # ---------------------------------------------------------------------------
   stylometry-ml-service:
     build:
       context: ./stylometry-ml-service
+    container_name: stylometry_ml
+    restart: unless-stopped
     ports:
       - "8001:8001"
     volumes:
       - ./stylometry-ml-service:/app
+      # Shared ML workspace — same bind mount as backend so both services
+      # read/write to the identical host-side directory.
       - ./ml_workspace:/ml_workspace
     environment:
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      # ── Fernet Encryption Key (must match backend) ───────────────────────────
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:?ENCRYPTION_KEY is required - must match the backend service value}
     command: uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8001/" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+# =============================================================================
+# Networks
+# =============================================================================
+# All services share the default bridge network created by Compose, which lets
+# them reach each other by service name (e.g. "stylometry-ml-service:8001").
+# No explicit network declaration is needed for this topology.
