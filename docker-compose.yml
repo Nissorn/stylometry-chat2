@@ -26,8 +26,8 @@ version: "3.8"
 #                      e.g. ws://your-droplet-ip:8000
 #                      Defaults to ws://localhost:8000
 #
-#   FRONTEND_PORT    — External port exposing the frontend container port 5173.
-#                      Default is 80 for production-friendly access.
+#   PUBLIC_DOMAIN    — Optional: deployment domain (documentation/reference only).
+#                      Example: stylometry.nissorn.codes
 #
 # Data Persistence on DigitalOcean Droplet:
 #   - SQLite database  → bind-mounted at ./backend/app.db (never inside the container layer)
@@ -40,6 +40,22 @@ version: "3.8"
 
 services:
   # ---------------------------------------------------------------------------
+  # Nginx — Public entrypoint / reverse proxy
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: stylometry_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - frontend
+      - backend
+
+  # ---------------------------------------------------------------------------
   # Backend — FastAPI + SQLite + Fernet
   # ---------------------------------------------------------------------------
   backend:
@@ -47,8 +63,6 @@ services:
       context: ./backend
     container_name: stylometry_backend
     restart: unless-stopped
-    ports:
-      - "8000:8000"
     volumes:
       # Source code (enables hot-reload in dev; remove in pure-prod builds)
       - ./backend:/app
@@ -87,15 +101,13 @@ services:
       start_period: 15s
 
   # ---------------------------------------------------------------------------
-  # Frontend — SvelteKit / Vite Dev Server
+  # Frontend — Svelte / Vite
   # ---------------------------------------------------------------------------
   frontend:
     build:
       context: ./frontend
     container_name: stylometry_frontend
     restart: unless-stopped
-    ports:
-      - "${FRONTEND_PORT:-80}:5173"
     volumes:
       - ./frontend:/app
       # Prevent the host from shadowing the container's node_modules
@@ -128,8 +140,6 @@ services:
       context: ./stylometry-ml-service
     container_name: stylometry_ml
     restart: unless-stopped
-    ports:
-      - "8001:8001"
     volumes:
       - ./stylometry-ml-service:/app
       # Shared ML workspace — same bind mount as backend so both services

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import List, Optional
 from datetime import datetime
 
@@ -68,7 +68,7 @@ class MessageResponse(BaseModel):
     id: int
     chat_id: int
     sender_id: int
-    text: str
+    text: str = Field(..., max_length=500)
     timestamp: datetime
     sender_username: str
 
@@ -98,3 +98,16 @@ class SuspiciousMessagesResponse(BaseModel):
 
 class ReviewMessagesRequest(BaseModel):
     approved: bool
+
+
+class WebSocketChatPayload(BaseModel):
+    message: str = Field(..., min_length=1, max_length=500)
+    enforce_security: bool = False
+
+    @field_validator("message")
+    @classmethod
+    def normalize_message(cls, value: str) -> str:
+        cleaned = value.replace("\x00", "").strip()
+        if not cleaned:
+            raise ValueError("Message cannot be empty")
+        return cleaned

@@ -9,11 +9,12 @@ from typing import Optional, Dict
 import httpx
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import ValidationError
 from jose import JWTError, jwt
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from . import auth, models
+from . import auth, models, schemas
 from .auth import router as auth_router
 from .chat import router as chat_router
 from .crypto import decrypt, encrypt
@@ -76,12 +77,24 @@ app.include_router(auth_router, prefix="/auth")
 app.include_router(chat_router, prefix="/chats")
 
 
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+    return response
+
+
 @app.get("/")
 def read_root():
     return {"message": "Welcome to Thai-Stylometry Ultimate API"}
 
 
 ML_SERVICE_URL = "http://stylometry-ml-service:8001/predict"
+WS_MAX_MSGS_PER_SECOND = 5
+WS_MAX_MESSAGE_LENGTH = 500
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +164,7 @@ async def websocket_endpoint(
 
     # msg_buffer starts empty for every new WebSocket connection
     msg_buffer: deque[str] = deque(maxlen=5)
+    inbound_timestamps: deque[float] = deque()
     print(
         f"[WS] Session started for '{username}' in chat {chat_id} — "
         f"buffer initialized empty."
@@ -164,11 +178,33 @@ async def websocket_endpoint(
             while True:
                 try:
                     payload_txt = await websocket.receive_text()
+                    now = asyncio.get_running_loop().time()
+                    while inbound_timestamps and (now - inbound_timestamps[0]) > 1.0:
+                        inbound_timestamps.popleft()
+                    if len(inbound_timestamps) >= WS_MAX_MSGS_PER_SECOND:
+                        await websocket.send_json(
+                            {
+                                "type": "rate_limit",
+                                "message": "Rate limit exceeded: max 5 messages per second.",
+                            }
+                        )
+                        continue
+                    inbound_timestamps.append(now)
+
                     data = json.loads(payload_txt)
-                    
-                    text: str = str(data.get("message", ""))
-                    enforce_security: bool = bool(data.get("enforce_security", False))
-                    clean_text = text.strip()
+                    payload = schemas.WebSocketChatPayload.model_validate(data)
+
+                    clean_text = payload.message
+                    if len(clean_text) > WS_MAX_MESSAGE_LENGTH:
+                        await websocket.send_json(
+                            {
+                                "type": "validation_error",
+                                "message": "Message too long (max 500 characters).",
+                            }
+                        )
+                        continue
+
+                    enforce_security: bool = payload.enforce_security
                     message_timestamp: Optional[str] = None
 
                     if len(clean_text) > 0:
@@ -344,6 +380,15 @@ async def websocket_endpoint(
 
                 except WebSocketDisconnect:
                     break
+                except ValidationError as exc:
+                    await websocket.send_json(
+                        {
+                            "type": "validation_error",
+                            "message": "Invalid message payload.",
+                            "detail": str(exc),
+                        }
+                    )
+                    continue
                 except Exception as e:
                     print(f"[WS] Loop error: {e}")
                     break

@@ -332,9 +332,13 @@
 
   // ── Chat Actions ───────────────────────────────────────────────────────────
   function sendChatMessage() {
-    if (ws && chatInput.trim() !== "") {
+    if (ws) {
+      const normalized = chatInput.replace(/\u0000/g, "").trim();
+      if (!normalized) return;
+
+      const safeMessage = normalized.slice(0, 500);
       ws.send(JSON.stringify({
-        message: chatInput.trim(),
+        message: safeMessage,
         enforce_security: securityEnforcement
       }));
       chatInput = "";
@@ -827,6 +831,7 @@
                   class="input input-bordered flex-1 dark:bg-gray-900 dark:text-gray-100 dark:border-gray-700" 
                   placeholder="Type a message..." 
                   bind:value={chatInput} 
+                  maxlength="500"
                   on:keydown={e => e.key === 'Enter' && sendChatMessage()}
                 />
                 <button class="btn btn-primary px-8" on:click={sendChatMessage}>Send</button>
