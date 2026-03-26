@@ -656,40 +656,41 @@
     <!-- Authenticated UI -->
     <div class="h-screen flex flex-col overflow-hidden bg-base-200 dark:bg-gray-900">
     <!-- ── Navbar ─────────────────────────────────────────────────────────── -->
-    <nav class="navbar bg-base-100 shadow-md px-4 md:px-6 z-20 border-b border-base-300 dark:bg-gray-900 dark:border-gray-700">
-      <div class="flex-1">
-        <span class="text-xl font-black tracking-tight text-primary uppercase italic">Stylometry Chat</span>
+    <nav class="navbar bg-base-100 shadow-md px-3 md:px-6 z-20 border-b border-base-300 dark:bg-gray-900 dark:border-gray-700 gap-2">
+      <div class="flex-1 min-w-0">
+        <span class="text-lg md:text-2xl font-black tracking-tight text-primary uppercase italic truncate">Stylometry Chat</span>
       </div>
-      
-      <div class="flex-none flex items-center gap-6">
-        <!-- Security Group -->
-        <div class="flex items-center gap-3">
-          <div class="flex flex-col items-end mr-1">
-            <span class="text-[10px] font-bold uppercase opacity-50 leading-none mb-1">Protection</span>
+
+      <div class="flex-none flex items-center gap-2 md:gap-6">
+        <!-- Security Group (always visible, compact on mobile) -->
+        <div class="flex items-center gap-2 md:gap-3">
+          <div class="flex flex-col items-end mr-0 md:mr-1">
+            <span class="text-[9px] md:text-[10px] font-bold uppercase opacity-50 leading-none mb-1">Protection</span>
             <input type="checkbox" class="toggle toggle-error toggle-xs" bind:checked={securityEnforcement} />
           </div>
-          
+
           {#if securityModeEnabled}
-            <div class="badge badge-success gap-1.5 py-3.5 px-4 font-bold text-[11px] uppercase shadow-sm border-none">
+            <div class="badge badge-success gap-1 py-2.5 px-2 md:py-3.5 md:px-4 font-bold text-[10px] md:text-[11px] uppercase shadow-sm border-none whitespace-nowrap">
               <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
                 <path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd" />
               </svg>
-              PIN Active
+              <span class="hidden sm:inline">PIN Active</span>
+              <span class="sm:hidden">PIN</span>
             </div>
           {:else}
-            <button class="btn btn-warning btn-sm btn-outline gap-2" on:click={() => showSecuritySetupModal = true}>
+            <button class="btn btn-warning btn-xs md:btn-sm btn-outline gap-1 md:gap-2 px-2 md:px-3 whitespace-nowrap" on:click={() => showSecuritySetupModal = true}>
               <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
                 <path fill-rule="evenodd" d="M2.166 4.999A11.954 11.954 0 0010 1.944 11.954 11.954 0 0017.834 5c.11.65.166 1.32.166 2.001 0 5.225-3.34 9.67-8 11.317C5.34 16.67 2 12.225 2 7c0-.682.057-1.35.166-2.001zm11.541 3.708a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
               </svg>
-              Enable PIN
+              <span class="hidden sm:inline">Enable PIN</span>
+              <span class="sm:hidden">PIN</span>
             </button>
           {/if}
         </div>
 
-        <div class="h-8 w-[1px] bg-base-300 dark:bg-gray-700"></div>
-
-        <!-- Debug/User Group -->
-        <div class="flex items-center gap-4">
+        <!-- Desktop Controls -->
+        <div class="hidden md:flex h-8 w-[1px] bg-base-300 dark:bg-gray-700"></div>
+        <div class="hidden md:flex items-center gap-4">
           <div class="flex items-center gap-2 tooltip tooltip-bottom" data-tip="Toggle Visual Trust Score">
             <span class="text-[10px] font-bold uppercase opacity-50">Debug</span>
             <input type="checkbox" class="toggle toggle-secondary toggle-xs" bind:checked={showDebug} />
@@ -712,6 +713,46 @@
               </svg>
             </button>
           </div>
+        </div>
+
+        <!-- Mobile Dropdown -->
+        <div class="dropdown dropdown-end md:hidden">
+          <button class="btn btn-ghost btn-sm btn-circle" aria-label="Open menu">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+            </svg>
+          </button>
+          <ul class="menu menu-sm dropdown-content mt-2 z-[60] w-64 rounded-box bg-base-100 p-2 shadow-xl border border-base-300 dark:bg-gray-800 dark:text-white dark:border-gray-700">
+            <li class="menu-title px-3 py-2">
+              <span class="text-xs uppercase opacity-60">Account</span>
+            </li>
+            <li>
+              <div class="px-3 py-3 flex items-center justify-between">
+                <span class="text-sm font-semibold">Debug Overlay</span>
+                <input type="checkbox" class="toggle toggle-secondary toggle-sm" bind:checked={showDebug} />
+              </div>
+            </li>
+            {#if showDebug}
+              <li>
+                <div class="px-3 py-3 text-sm">
+                  Score: <span class={trustScore < 40 ? 'text-error font-bold' : 'text-success font-bold'}>{trustScore.toFixed(1)}</span>
+                </div>
+              </li>
+            {/if}
+            <li>
+              <div class="px-3 py-3 flex items-center justify-between">
+                <div class="flex flex-col">
+                  <span class="text-sm font-bold leading-none">{currentUser}</span>
+                  <span class="text-[11px] opacity-60">Standard User</span>
+                </div>
+              </div>
+            </li>
+            <li>
+              <button class="px-3 py-3 text-left hover:bg-error/10 hover:text-error" on:click={logout}>
+                Logout
+              </button>
+            </li>
+          </ul>
         </div>
       </div>
     </nav>
