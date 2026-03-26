@@ -93,10 +93,10 @@
   }
 </script>
 
-<div class="w-80 bg-base-100 shadow-xl rounded-box flex flex-col shrink-0 h-full overflow-hidden border border-base-300">
+<div class="w-full md:w-80 bg-base-100 dark:bg-gray-900 shadow-xl rounded-box flex flex-col shrink-0 h-full overflow-hidden border border-base-300 dark:border-gray-700">
   <!-- Header -->
-  <div class="bg-base-100 p-5 font-bold border-b border-base-200 flex justify-between items-center z-10">
-    <span class="text-xl tracking-wide">Chats</span>
+  <div class="bg-base-100 dark:bg-gray-900 p-4 md:p-5 font-bold border-b border-base-200 dark:border-gray-700 flex justify-between items-center z-10">
+    <span class="text-xl tracking-wide text-base-content dark:text-gray-100">Chats</span>
     <button class="btn btn-circle btn-sm btn-ghost hover:bg-base-200 transition-colors" on:click={() => showModal = true}>
       <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
@@ -105,12 +105,12 @@
   </div>
 
   <!-- Chat List -->
-  <div class="flex-1 overflow-y-auto p-3 bg-base-100/50 space-y-1 custom-scrollbar">
+  <div class="flex-1 overflow-y-auto p-3 bg-base-100/50 dark:bg-gray-900/60 space-y-1 custom-scrollbar">
     {#each $chats as chat}
       {@const chatName = chat.name || `Chat #${chat.id}`}
       {@const isActive = $selectedChatId === chat.id}
       <button
-        class="w-full flex items-center gap-3 p-3 rounded-2xl transition-all duration-200 {isActive ? 'bg-primary/10 border border-primary/20' : 'hover:bg-base-200 border border-transparent'}"
+        class="w-full flex items-center gap-3 p-3 rounded-2xl transition-all duration-200 {isActive ? 'bg-primary/15 border border-primary/30 dark:bg-blue-600/20 dark:border-blue-500/40' : 'hover:bg-base-200 dark:hover:bg-gray-800 border border-transparent'}"
         on:click={() => selectChat(chat.id)}
       >
         <!-- Avatar -->
@@ -122,7 +122,7 @@
 
         <!-- Chat Info -->
         <div class="flex-1 text-left overflow-hidden">
-          <div class="font-semibold text-[15px] truncate flex items-center gap-1 {isActive ? 'text-primary drop-shadow-sm' : 'text-base-content'}">
+          <div class="font-semibold text-[15px] truncate flex items-center gap-1 {isActive ? 'text-primary dark:text-blue-300 drop-shadow-sm' : 'text-base-content dark:text-gray-100'}">
             {#if chat.is_group}
               <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 opacity-70" viewBox="0 0 20 20" fill="currentColor">
                 <path d="M13 6a3 3 0 11-6 0 3 3 0 016 0zM18 8a2 2 0 11-4 0 2 2 0 014 0zM14 15a4 4 0 00-8 0v3h8v-3zM6 8a2 2 0 11-4 0 2 2 0 014 0zM16 18v-3a5.972 5.972 0 00-.75-2.906A3.005 3.005 0 0119 15v3h-3zM4.75 12.094A5.973 5.973 0 004 15v3H1v-3a3 3 0 013.75-2.906z" />
@@ -134,7 +134,7 @@
             {/if}
             {chatName}
           </div>
-          <div class="text-xs text-base-content/50 truncate mt-0.5">
+          <div class="text-xs text-base-content/50 dark:text-gray-400 truncate mt-0.5">
             {chat.is_group ? `${chat.members?.length || 0} Members` : 'Personal Secure Chat'}
           </div>
         </div>
@@ -147,7 +147,7 @@
     {/each}
 
     {#if $chats.length === 0}
-      <div class="flex flex-col items-center justify-center h-40 text-base-content/40 space-y-3">
+      <div class="flex flex-col items-center justify-center h-40 text-base-content/40 dark:text-gray-500 space-y-3">
         <svg xmlns="http://www.w3.org/2000/svg" class="h-10 w-10 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
         </svg>
@@ -160,8 +160,8 @@
 <!-- Modal for New Chat -->
 {#if showModal}
 <dialog class="modal modal-open">
-  <div class="modal-box rounded-2xl p-0 overflow-hidden shadow-2xl border border-base-300">
-    <div class="bg-base-200/50 p-6 border-b border-base-300 flex justify-between items-start">
+  <div class="modal-box w-11/12 max-w-md max-h-[90vh] overflow-y-auto rounded-2xl p-0 shadow-2xl border border-base-300 dark:bg-gray-900 dark:text-gray-100 dark:border-gray-700">
+    <div class="bg-base-200/50 dark:bg-gray-800 p-4 md:p-6 border-b border-base-300 dark:border-gray-700 flex justify-between items-start gap-3">
       <div>
         <h3 class="font-bold text-xl flex items-center gap-2">
           <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-primary" viewBox="0 0 20 20" fill="currentColor">
@@ -180,14 +180,14 @@
       </div>
     </div>
 
-    <div class="p-6 space-y-4 bg-base-100">
+    <div class="p-4 md:p-6 space-y-4 bg-base-100 dark:bg-gray-900">
       <!-- Room Name Input -->
       <div class="form-control w-full">
         <label class="label pt-0"><span class="label-text font-medium text-base-content/80">Room Name</span></label>
         <input
           type="text"
           placeholder="e.g. Project Alpha"
-          class="input input-bordered w-full focus:input-primary transition-all rounded-xl"
+          class="input input-bordered w-full focus:input-primary transition-all rounded-xl dark:bg-gray-800 dark:text-gray-100 dark:border-gray-700"
           bind:value={newChatName}
           on:keydown={(e) => { if (e.key === 'Enter' && !isGroupChat) createChat(); }}
           autofocus
@@ -196,7 +196,7 @@
 
       <!-- Additive Modal Component: Dynamic Member Logic for Group Chat -->
       {#if isGroupChat}
-      <div class="form-control w-full mt-4 bg-base-200/40 p-3 rounded-xl border border-base-200">
+      <div class="form-control w-full mt-4 bg-base-200/40 dark:bg-gray-800 p-3 rounded-xl border border-base-200 dark:border-gray-700">
         <label class="label pt-0"><span class="label-text font-medium text-base-content/80">Add Members (Usernames)</span></label>
 
         <!-- Add Users visually -->
@@ -216,7 +216,7 @@
           <input
             type="text"
             placeholder="Type a username..."
-            class="input input-bordered input-sm w-full focus:input-accent"
+            class="input input-bordered input-sm w-full focus:input-accent dark:bg-gray-900 dark:text-gray-100 dark:border-gray-700"
             bind:value={memberInput}
             on:keydown={(e) => e.key === 'Enter' && addMember()}
           />
@@ -228,7 +228,7 @@
     </div>
 
     <!-- Footer Buttons -->
-    <div class="p-4 bg-base-200/30 flex justify-end gap-3 rounded-b-2xl">
+    <div class="p-4 bg-base-200/30 dark:bg-gray-800 flex justify-end gap-3 rounded-b-2xl">
       <button class="btn btn-ghost rounded-xl px-5" on:click={resetModal}>Cancel</button>
       <button class="btn btn-primary rounded-xl px-6 shadow-md" on:click={createChat} disabled={!newChatName.trim()}>
         {isGroupChat ? 'Create Group Chat' : 'Create Chat'}

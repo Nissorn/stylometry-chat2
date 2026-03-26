@@ -573,7 +573,7 @@
   }
 </script>
 
-<main class="min-h-screen bg-base-200">
+<main class="min-h-screen bg-base-200 text-base-content dark:bg-gray-900 dark:text-gray-100">
   {#if !isAuthenticated}
     <div class="flex items-center justify-center min-h-screen p-4">
       <div class="card w-full max-w-md bg-base-100 shadow-2xl border border-base-300 overflow-hidden">
@@ -654,9 +654,9 @@
     </div>
   {:else}
     <!-- Authenticated UI -->
-    <div class="h-screen flex flex-col overflow-hidden">
+    <div class="h-screen flex flex-col overflow-hidden bg-base-200 dark:bg-gray-900">
     <!-- ── Navbar ─────────────────────────────────────────────────────────── -->
-    <nav class="navbar bg-base-100 shadow-md px-6 z-20">
+    <nav class="navbar bg-base-100 shadow-md px-4 md:px-6 z-20 border-b border-base-300 dark:bg-gray-900 dark:border-gray-700">
       <div class="flex-1">
         <span class="text-xl font-black tracking-tight text-primary uppercase italic">Stylometry Chat</span>
       </div>
@@ -686,7 +686,7 @@
           {/if}
         </div>
 
-        <div class="h-8 w-[1px] bg-base-300"></div>
+        <div class="h-8 w-[1px] bg-base-300 dark:bg-gray-700"></div>
 
         <!-- Debug/User Group -->
         <div class="flex items-center gap-4">
@@ -696,7 +696,7 @@
           </div>
 
           {#if showDebug}
-            <div class="badge badge-ghost font-mono text-xs gap-2 py-3 border-base-300">
+            <div class="badge badge-ghost font-mono text-xs gap-2 py-3 border-base-300 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100">
               Score: <span class={trustScore < 40 ? 'text-error font-bold' : 'text-success font-bold'}>{trustScore.toFixed(1)}</span>
             </div>
           {/if}
@@ -716,13 +716,15 @@
       </div>
     </nav>
 
-      <div class="flex-1 flex overflow-hidden p-4 gap-4">
-        <Sidebar {token} />
+      <div class="flex-1 flex overflow-hidden p-2 md:p-4 gap-0 md:gap-4">
+        <div class="h-full w-full md:w-auto {($selectedChatId ? 'hidden md:flex' : 'flex')}">
+          <Sidebar {token} />
+        </div>
 
         <!-- Chat Container -->
-        <div class="flex-1 flex flex-col bg-base-100 rounded-2xl shadow-xl overflow-hidden border border-base-300">
+        <div class="h-full w-full flex-1 flex-col bg-base-100 rounded-2xl shadow-xl overflow-hidden border border-base-300 dark:bg-gray-900 dark:border-gray-700 {(!$selectedChatId ? 'hidden md:flex' : 'flex')}">
           {#if !$selectedChatId}
-            <div class="flex-1 flex flex-col items-center justify-center opacity-30 select-none">
+            <div class="flex-1 flex flex-col items-center justify-center opacity-40 dark:opacity-60 select-none text-base-content dark:text-gray-100">
               <svg xmlns="http://www.w3.org/2000/svg" class="h-24 w-24 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
               </svg>
@@ -730,10 +732,21 @@
             </div>
           {:else}
             <!-- Chat Header -->
-            <div class="bg-base-200 p-4 border-b border-base-300 flex justify-between items-center">
-              <div>
+            <div class="bg-base-200 p-3 md:p-4 border-b border-base-300 dark:bg-gray-800 dark:border-gray-700 flex justify-between items-center gap-2">
+              <div class="flex items-center gap-2 min-w-0">
+                <button
+                  class="btn btn-ghost btn-sm btn-circle md:hidden"
+                  on:click={() => selectedChatId.set(null)}
+                  aria-label="Back to chats"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
+                  </svg>
+                </button>
+                <div class="min-w-0">
                 <h3 class="font-bold text-lg">{activeChat?.name || 'Chat Room'}</h3>
                 <p class="text-xs opacity-50">{activeChat?.members?.length || 0} Members</p>
+                </div>
               </div>
               <div class="flex gap-2">
                 {#if activeChat?.is_group}
@@ -745,14 +758,14 @@
             </div>
 
             <!-- Messages Area -->
-            <div class="flex-1 overflow-y-auto p-6" bind:this={chatContainer}>
+            <div class="flex-1 overflow-y-auto p-4 md:p-6" bind:this={chatContainer}>
               {#if isLoadingHistory}
                 <div class="flex justify-center p-12"><span class="loading loading-spinner loading-lg"></span></div>
               {:else}
                 {#each messages as msg}
                   <div class="chat {msg.sender === currentUser ? 'chat-end' : 'chat-start'} mb-4">
-                    <div class="chat-header text-xs opacity-50 mb-1">{msg.sender}</div>
-                    <div class="chat-bubble {msg.sender === currentUser ? 'chat-bubble-primary' : 'bg-base-200 text-base-content'}">
+                    <div class="chat-header text-xs opacity-60 dark:text-gray-300 mb-1">{msg.sender}</div>
+                    <div class="chat-bubble {msg.sender === currentUser ? 'chat-bubble-primary text-primary-content dark:bg-blue-600 dark:text-gray-100' : 'bg-base-200 text-base-content dark:bg-gray-800 dark:text-gray-100'}">
                       {msg.text}
                     </div>
                   </div>
@@ -761,16 +774,16 @@
             </div>
 
             <!-- Input Area -->
-            <div class="p-4 bg-base-200 border-t border-base-300">
+            <div class="p-3 md:p-4 bg-base-200 border-t border-base-300 dark:bg-gray-800 dark:border-gray-700">
               {#if systemAlert}
-                <div class="alert alert-warning py-2 mb-3 text-xs font-bold uppercase animate-pulse">
+                <div class="alert alert-warning py-2 mb-3 text-xs font-bold uppercase animate-pulse border border-warning/50 dark:bg-yellow-200 dark:text-yellow-900 dark:border-yellow-500">
                   ⚠️ {systemAlert.message}
                 </div>
               {/if}
               <div class="flex gap-2">
                 <input 
                   type="text" 
-                  class="input input-bordered flex-1" 
+                  class="input input-bordered flex-1 dark:bg-gray-900 dark:text-gray-100 dark:border-gray-700" 
                   placeholder="Type a message..." 
                   bind:value={chatInput} 
                   on:keydown={e => e.key === 'Enter' && sendChatMessage()}
@@ -787,8 +800,8 @@
   <!-- PIN Modal (Full Screen Overlay) -->
   {#if showPinModal}
     <div class="fixed inset-0 z-[100] bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-      <div class="card w-full max-w-sm bg-base-100 shadow-2xl border-2 border-error">
-        <div class="card-body items-center text-center py-10">
+      <div class="card w-11/12 max-w-sm max-h-[90vh] overflow-y-auto bg-base-100 shadow-2xl border-2 border-error dark:bg-gray-900 dark:border-red-500">
+        <div class="card-body items-center text-center py-8 md:py-10 dark:text-gray-100">
           {#if !showReviewStep}
             <div class="text-6xl mb-4 animate-bounce">🔐</div>
             <h2 class="card-title text-2xl font-bold text-error">Session Frozen</h2>
@@ -797,7 +810,7 @@
             <div class="form-control w-full mb-4">
               <input
                 type="password"
-                class="input input-bordered input-error text-center tracking-[1em] text-2xl font-bold"
+                class="input input-bordered input-error text-center tracking-[1em] text-2xl font-bold dark:bg-gray-800 dark:text-gray-100 dark:border-red-500"
                 maxlength="6"
                 placeholder="••••••"
                 bind:value={pinInput}
@@ -816,7 +829,7 @@
             <h2 class="card-title text-xl font-bold">Review Suspicious Messages</h2>
             <p class="text-sm opacity-70 mb-4">Did you send these messages?</p>
 
-            <div class="w-full max-h-56 overflow-y-auto bg-base-200 rounded-xl p-3 mb-4 text-left">
+            <div class="w-full max-h-56 md:max-h-64 overflow-y-auto bg-base-200 rounded-xl p-3 mb-4 text-left dark:bg-gray-800 dark:text-gray-100">
               {#if suspiciousMessages.length === 0}
                 <p class="text-xs opacity-60">No captured messages found. You can still submit your decision.</p>
               {:else}
@@ -858,7 +871,7 @@
   <!-- Register Modal -->
   {#if showRegisterModal}
     <div class="modal modal-open">
-      <div class="modal-box max-w-md p-8">
+      <div class="modal-box w-11/12 max-w-md max-h-[90vh] overflow-y-auto p-6 md:p-8 dark:bg-gray-900 dark:text-gray-100 dark:border dark:border-gray-700">
         <h3 class="font-black text-2xl mb-6">Create Account</h3>
         <form on:submit|preventDefault={register} class="space-y-6">
           <div class="form-control">
@@ -869,7 +882,7 @@
               id="reg-username"
               type="text"
               placeholder="Pick a username"
-              class="input input-bordered focus:input-primary w-full transition-all"
+              class="input input-bordered focus:input-primary w-full transition-all dark:bg-gray-800 dark:text-gray-100 dark:border-gray-700"
               bind:value={newUsername}
               required
             />
@@ -882,7 +895,7 @@
               id="reg-password"
               type="password"
               placeholder="••••••••"
-              class="input input-bordered focus:input-primary w-full"
+              class="input input-bordered focus:input-primary w-full dark:bg-gray-800 dark:text-gray-100 dark:border-gray-700"
               bind:value={newPassword}
               required
             />
@@ -899,7 +912,7 @@
   <!-- Security Settings Modal -->
   {#if showSecuritySetupModal}
     <div class="modal modal-open">
-      <div class="modal-box max-w-xl p-0 overflow-hidden bg-base-100 shadow-2xl">
+      <div class="modal-box w-11/12 max-w-2xl max-h-[90vh] p-0 overflow-y-auto bg-base-100 shadow-2xl dark:bg-gray-900 dark:text-gray-100 dark:border dark:border-gray-700">
         <div class="bg-primary p-8 text-primary-content">
           <h3 class="font-black text-3xl tracking-tight mb-2">Shield Protection</h3>
           <p class="opacity-80 font-medium">Configure advanced security features for your account.</p>
@@ -918,7 +931,7 @@
             </div>
 
             {#if !isSettingUpTOTP}
-              <div class="bg-base-200 rounded-2xl p-6 flex items-center justify-between border border-base-300">
+              <div class="bg-base-200 rounded-2xl p-4 md:p-6 flex flex-col md:flex-row items-start md:items-center gap-4 justify-between border border-base-300 dark:bg-gray-800 dark:border-gray-700">
                 <div>
                   <p class="font-bold text-base mb-1">Two-Factor Authentication (2FA)</p>
                   <p class="text-xs opacity-60">Adds an extra layer of security using a time-based code.</p>
@@ -928,22 +941,22 @@
                 </button>
               </div>
             {:else}
-              <div class="bg-base-200 rounded-2xl p-6 border border-secondary/50 space-y-6">
+              <div class="bg-base-200 rounded-2xl p-4 md:p-6 border border-secondary/50 dark:bg-gray-800 dark:border-gray-700 space-y-6">
                 <div>
                   <p class="font-bold text-base mb-2">Scan QR Code</p>
                   <p class="text-xs opacity-60 mb-4">Use an authenticator app like Google Authenticator, Authy, or Microsoft Authenticator.</p>
-                  <div class="bg-base-100 p-4 rounded-lg border border-base-300 flex items-center justify-center">
+                  <div class="bg-base-100 p-3 md:p-4 rounded-lg border border-base-300 dark:bg-gray-900 dark:border-gray-700 flex items-center justify-center">
                     {#if qrCodeBase64}
-                      <img src="data:image/png;base64,{qrCodeBase64}" alt="TOTP QR Code" class="w-48 h-48" />
+                      <img src="data:image/png;base64,{qrCodeBase64}" alt="TOTP QR Code" class="w-40 h-40 sm:w-48 sm:h-48" />
                     {:else}
                       <div class="loading loading-spinner loading-lg"></div>
                     {/if}
                   </div>
                 </div>
 
-                <div class="bg-base-100 p-4 rounded-lg border border-base-300">
+                <div class="bg-base-100 p-4 rounded-lg border border-base-300 dark:bg-gray-900 dark:border-gray-700">
                   <p class="text-[10px] font-bold uppercase opacity-50 mb-2">Backup Key (Manual Entry)</p>
-                  <div class="font-mono text-sm font-bold tracking-wider text-center p-3 bg-base-200 rounded border border-base-300 select-all">
+                  <div class="font-mono text-sm font-bold tracking-wider text-center p-3 bg-base-200 rounded border border-base-300 dark:bg-gray-800 dark:border-gray-700 select-all break-all">
                     {totpSecretText}
                   </div>
                   <p class="text-xs opacity-60 mt-2">Save this code in a safe place. You can use it to recover access if you lose your authenticator.</p>
@@ -958,7 +971,7 @@
                     type="text"
                     placeholder="000000"
                     maxlength="6"
-                    class="input input-bordered focus:input-secondary w-full tracking-[1em] font-mono text-center text-lg font-bold"
+                    class="input input-bordered focus:input-secondary w-full tracking-[1em] font-mono text-center text-lg font-bold dark:bg-gray-900 dark:text-gray-100 dark:border-gray-700"
                     bind:value={setupTotpCode}
                     on:keydown={e => e.key === 'Enter' && !isTotpVerifying && verifyTOTPCode()}
                     disabled={isTotpVerifying}
@@ -999,7 +1012,7 @@
               <h4 class="font-bold text-lg uppercase tracking-wider opacity-90">Step-Up Auth</h4>
             </div>
 
-            <div class="bg-base-200 rounded-2xl p-6 border border-base-300">
+            <div class="bg-base-200 rounded-2xl p-4 md:p-6 border border-base-300 dark:bg-gray-800 dark:border-gray-700">
               {#if securityModeEnabled}
                 <div class="flex items-center justify-between">
                   <div>
@@ -1018,7 +1031,7 @@
                     type="password"
                     placeholder="Enter 6-digit PIN"
                     maxlength="6"
-                    class="input input-bordered focus:input-warning w-full tracking-[1em] font-mono text-center"
+                    class="input input-bordered focus:input-warning w-full tracking-[1em] font-mono text-center dark:bg-gray-900 dark:text-gray-100 dark:border-gray-700"
                     bind:value={securitySetupPin}
                   />
                 </div>
@@ -1030,7 +1043,7 @@
           </section>
         </div>
 
-        <div class="p-6 bg-base-200 border-t border-base-300 flex justify-end">
+        <div class="p-4 md:p-6 bg-base-200 border-t border-base-300 dark:bg-gray-800 dark:border-gray-700 flex justify-end">
           <button class="btn btn-ghost px-8" on:click={() => {
             showSecuritySetupModal = false;
             isSettingUpTOTP = false;
@@ -1047,7 +1060,7 @@
   <!-- Create Chat Modal -->
   {#if showCreateChatModal}
     <div class="modal modal-open z-50">
-      <div class="modal-box max-w-md p-8">
+      <div class="modal-box w-11/12 max-w-md max-h-[90vh] overflow-y-auto p-6 md:p-8 dark:bg-gray-900 dark:text-gray-100 dark:border dark:border-gray-700">
         <h3 class="font-black text-2xl mb-6 text-primary">New Conversation</h3>
         <div class="space-y-6">
           <div class="form-control">
@@ -1058,7 +1071,7 @@
               id="room-name"
               type="text"
               placeholder="e.g. Project X"
-              class="input input-bordered focus:input-primary w-full"
+              class="input input-bordered focus:input-primary w-full dark:bg-gray-800 dark:text-gray-100 dark:border-gray-700"
               bind:value={newChatName}
             />
           </div>
@@ -1072,7 +1085,7 @@
                 id="add-member"
                 type="text"
                 placeholder="Username"
-                class="input input-bordered join-item w-full focus:input-primary"
+                class="input input-bordered join-item w-full focus:input-primary dark:bg-gray-800 dark:text-gray-100 dark:border-gray-700"
                 bind:value={memberToAdd}
               />
               <button class="btn btn-primary join-item" on:click={addMember}>Add</button>
@@ -1080,7 +1093,7 @@
           </div>
 
           {#if newChatMembers.length > 0}
-            <div class="bg-base-200 rounded-xl p-4">
+            <div class="bg-base-200 rounded-xl p-4 dark:bg-gray-800 dark:border dark:border-gray-700">
               <span class="text-[10px] font-bold uppercase opacity-50 block mb-3">Participants</span>
               <div class="flex flex-wrap gap-2">
                 {#each newChatMembers as m}
@@ -1109,15 +1122,15 @@
   <!-- Member Management Modal -->
   {#if showMemberModal && activeChat}
     <dialog class="modal modal-open">
-      <div class="modal-box">
+      <div class="modal-box w-11/12 max-w-md max-h-[90vh] overflow-y-auto dark:bg-gray-900 dark:text-gray-100 dark:border dark:border-gray-700">
         <h3 class="font-bold text-lg mb-4">Manage Members</h3>
         <div class="flex gap-2 mb-6">
-          <input type="text" placeholder="Username" class="input input-bordered flex-1" bind:value={newMemberUsername} />
+          <input type="text" placeholder="Username" class="input input-bordered flex-1 dark:bg-gray-800 dark:text-gray-100 dark:border-gray-700" bind:value={newMemberUsername} />
           <button class="btn btn-primary" on:click={addGroupMember}>Add</button>
         </div>
         <div class="space-y-2 max-h-60 overflow-y-auto">
           {#each activeChat.members as member}
-            <div class="flex justify-between items-center p-2 bg-base-200 rounded-lg">
+            <div class="flex justify-between items-center p-2 bg-base-200 dark:bg-gray-800 rounded-lg">
               <span class="font-medium">{member.username}</span>
               {#if member.username !== currentUser}
                 <button class="btn btn-xs btn-error btn-outline" on:click={() => removeGroupMember(member.username)}>Remove</button>
