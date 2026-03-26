@@ -89,7 +89,7 @@ async def _enable_security_rest(api_base: str, token: str, pin: str):
     async with httpx.AsyncClient() as client:
         print(f"[SECURITY] Registering step-up PIN at {url} …")
         resp = await client.post(url, json={"pin": pin}, headers=headers, timeout=10.0)
-        if resp.ok:
+        if resp.is_success:
             print(f"[SECURITY] ✅ Security Mode enabled.")
         else:
             print(f"[SECURITY] ❌ Failed to enable: {resp.text}")
@@ -129,6 +129,7 @@ async def run_injector(
     mode: str,
     count: int,
     pin: Optional[str],
+    security_on: bool,
     delay_range: tuple[float, float],
 ) -> None:
     # 1. Setup
@@ -136,14 +137,17 @@ async def run_injector(
     resolved_id = chat["id"]
     
     # Check/Enable Security
-    security_on = await _fetch_security_status(api_base, token)
+    db_security = await _fetch_security_status(api_base, token)
+    effective_security = security_on or db_security or bool(pin)
+    
     if pin:
         await _enable_security_rest(api_base, token, pin)
-        security_on = True
+        effective_security = True
 
     print("=" * 60)
     print(f'  Target Chat : #{resolved_id}  "{chat.get("name", "Unnamed")}"')
     print(f"  Security    : {'ENABLED (will respond to PIN challenges)' if pin else 'DISABLED (hard-kick on trust drop)'}")
+    print(f"  Enforcing   : {effective_security}")
     print("=" * 60)
 
     queue = _build_message_queue(mode, count)
@@ -197,7 +201,7 @@ async def run_injector(
             for i, item in enumerate(queue):
                 payload = {
                     "message": item["text"],
-                    "enforce_security": True if pin else False
+                    "enforce_security": effective_security
                 }
                 print(f"  [{i+1}/{len(queue)}] Sending ({item['label']}): {item['text'][:60]}...")
                 await ws.send(json.dumps(payload))
@@ -216,6 +220,7 @@ def main():
     parser.add_argument("--mode", choices=["good", "impostor", "both"], default="both")
     parser.add_argument("--count", type=int, default=0)
     parser.add_argument("--pin", help="6-digit PIN for auto-responding to challenges")
+    parser.add_argument("--security_on", action="store_true", help="Force security enforcement on messages")
     parser.add_argument("--api_base", default="http://localhost:8000")
     args = parser.parse_args()
 
@@ -226,6 +231,7 @@ def main():
         mode=args.mode,
         count=args.count,
         pin=args.pin,
+        security_on=args.security_on,
         delay_range=(1.5, 3.5),
     ))
 

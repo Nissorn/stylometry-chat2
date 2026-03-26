@@ -10,9 +10,12 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String, unique=True, index=True)
     hashed_password = Column(String)
+    # --- 2FA / TOTP ---
     totp_secret = Column(String, nullable=True)
     is_totp_enabled = Column(Boolean, default=False)
-    security_enabled = Column(Boolean, default=True)
+
+    # --- Step-up Security ---
+    security_enabled = Column(Boolean, default=False)
     unlock_pin_hash = Column(String, nullable=True)
     is_frozen = Column(Boolean, default=False)
     

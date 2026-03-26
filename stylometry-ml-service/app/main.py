@@ -246,10 +246,14 @@ def predict(req: PredictRequest):
     # Process Late Fusion for each message INDIVIDUALLY
     confidences = []
     for msg in valid_msgs:
-        # 1. Deep Feature
+        # 1. Deep Feature — MUST use BASE_CNN_MODEL (same extractor as training).
+        # The per-user cnn_model has random weights and always produces the same
+        # output regardless of input, causing the static 0.9967 score bug.
+        _cnn_for_pred   = BASE_CNN_MODEL if BASE_CNN_MODEL is not None else cnn_model
+        _vocab_for_pred = BASE_VOCAB     if BASE_CNN_MODEL is not None else vocab
         with torch.no_grad():
-            encoded = torch.tensor([vocab.encode(msg, max_len=256)], dtype=torch.long)
-            feat = cnn_model([encoded], return_features=True)
+            encoded = torch.tensor([_vocab_for_pred.encode(msg, max_len=256)], dtype=torch.long)
+            feat = _cnn_for_pred([encoded], return_features=True)
             X_deep = feat.numpy()
             
         # 2. Meta Feature

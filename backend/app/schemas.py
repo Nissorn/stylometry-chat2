@@ -30,8 +30,9 @@ class TOTPVerifyRequest(BaseModel):
 class UserResponse(BaseModel):
     id: int
     username: str
-    security_enabled: bool
-    is_frozen: bool
+    is_totp_enabled: bool = False
+    security_enabled: bool = False
+    is_frozen: bool = False
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -39,8 +40,10 @@ class UserResponse(BaseModel):
 class UserMeResponse(BaseModel):
     id: int
     username: str
-    security_enabled: bool
-    is_frozen: bool
+    is_totp_enabled: bool = False
+    security_enabled: bool = False
+    is_frozen: bool = False
+    unlock_pin_hash: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
