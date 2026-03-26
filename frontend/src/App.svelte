@@ -239,12 +239,15 @@
         headers: { "Authorization": `Bearer ${token}` }
       });
       if (!optionsRes.ok) {
-        const data = await optionsRes.json();
-        stepupError = data.detail || "Unable to start passkey verification";
+        stepupError = await extractErrorMessage(optionsRes, "Unable to start passkey verification");
         return;
       }
 
-      const optionsJSON = await optionsRes.json();
+      const optionsJSON = await parseJsonSafe(optionsRes);
+      if (optionsJSON?.raw) {
+        stepupError = "Invalid options response from server";
+        return;
+      }
       const credential = await startAuthentication({ optionsJSON });
 
       const verifyRes = await fetch(`${API_BASE}/auth/webauthn/stepup/verify`, {
@@ -256,8 +259,7 @@
         body: JSON.stringify({ credential })
       });
       if (!verifyRes.ok) {
-        const data = await verifyRes.json();
-        stepupError = data.detail || "Passkey verification failed";
+        stepupError = await extractErrorMessage(verifyRes, "Passkey verification failed");
         return;
       }
 
@@ -362,6 +364,32 @@
     checkFrozenStatus();
   }
 
+  async function parseJsonSafe(res) {
+    const contentType = (res.headers.get("content-type") || "").toLowerCase();
+    if (!contentType.includes("application/json")) {
+      const raw = await res.text();
+      return { raw };
+    }
+
+    try {
+      return await res.json();
+    } catch {
+      const raw = await res.text();
+      return { raw };
+    }
+  }
+
+  async function extractErrorMessage(res, fallback) {
+    const data = await parseJsonSafe(res);
+    if (typeof data?.detail === "string" && data.detail.trim()) return data.detail;
+    if (typeof data?.message === "string" && data.message.trim()) return data.message;
+    if (typeof data?.raw === "string") {
+      const text = data.raw.trim();
+      if (text) return text.slice(0, 180);
+    }
+    return fallback;
+  }
+
   // ── Chat Actions ───────────────────────────────────────────────────────────
   function sendChatMessage() {
     if (ws) {
@@ -448,12 +476,15 @@
         body: JSON.stringify({ username: username.trim() })
       });
       if (!optionsRes.ok) {
-        const data = await optionsRes.json();
-        errorMessage = data.detail || "Unable to start passkey login";
+        errorMessage = await extractErrorMessage(optionsRes, "Unable to start passkey login");
         return;
       }
 
-      const optionsJSON = await optionsRes.json();
+      const optionsJSON = await parseJsonSafe(optionsRes);
+      if (optionsJSON?.raw) {
+        errorMessage = "Invalid options response from server";
+        return;
+      }
       const credential = await startAuthentication({ optionsJSON });
 
       const verifyRes = await fetch(`${API_BASE}/auth/webauthn/login/verify`, {
@@ -464,9 +495,9 @@
           credential
         })
       });
-      const data = await verifyRes.json();
+      const data = await parseJsonSafe(verifyRes);
       if (!verifyRes.ok) {
-        errorMessage = data.detail || "Passkey login failed";
+        errorMessage = (typeof data?.detail === "string" && data.detail) || "Passkey login failed";
         return;
       }
 
@@ -602,12 +633,15 @@
         headers: { "Authorization": `Bearer ${token}` }
       });
       if (!optionsRes.ok) {
-        const data = await optionsRes.json();
-        passkeySetupError = data.detail || "Unable to start passkey registration";
+        passkeySetupError = await extractErrorMessage(optionsRes, "Unable to start passkey registration");
         return;
       }
 
-      const optionsJSON = await optionsRes.json();
+      const optionsJSON = await parseJsonSafe(optionsRes);
+      if (optionsJSON?.raw) {
+        passkeySetupError = "Invalid options response from server";
+        return;
+      }
       const credential = await startRegistration({ optionsJSON });
 
       const verifyRes = await fetch(`${API_BASE}/auth/webauthn/register/verify`, {
@@ -627,8 +661,7 @@
         localStorage.setItem("securityModeEnabled", "true");
         setTimeout(() => { showSecuritySetupModal = false; }, 1500);
       } else {
-        const data = await verifyRes.json();
-        passkeySetupError = data.detail || "Passkey registration failed";
+        passkeySetupError = await extractErrorMessage(verifyRes, "Passkey registration failed");
       }
     } catch (e) {
       passkeySetupError = e?.message || "Passkey registration canceled or failed";

@@ -41,14 +41,20 @@ def _new_challenge() -> str:
     return _b64url_encode(secrets.token_bytes(32))
 
 
+def _normalize_challenge_bytes(challenge: str | bytes) -> bytes:
+    if isinstance(challenge, bytes):
+        return challenge
+    return _b64url_decode(challenge)
+
+
 def _set_challenge(user_id: int, purpose: str, challenge: str) -> None:
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=CHALLENGE_TTL_SECONDS)
     with _challenge_lock:
-        _challenge_store[(user_id, purpose)] = (challenge, expires_at)
+        _challenge_store[(int(user_id), purpose)] = (challenge, expires_at)
 
 
 def _pop_challenge(user_id: int, purpose: str) -> str:
-    key = (user_id, purpose)
+    key = (int(user_id), purpose)
     with _challenge_lock:
         item = _challenge_store.pop(key, None)
     if not item:
@@ -77,6 +83,25 @@ def _require_webauthn():
     return verify_registration_response, verify_authentication_response
 
 
+def _raise_as_client_error(exc: Exception, fallback: str) -> None:
+    try:
+        from webauthn.helpers.exceptions import (
+            InvalidAuthenticationResponse,
+            InvalidRegistrationResponse,
+        )
+
+        if isinstance(exc, (InvalidRegistrationResponse, InvalidAuthenticationResponse)):
+            raise HTTPException(status_code=400, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    if isinstance(exc, HTTPException):
+        raise exc
+    raise HTTPException(status_code=400, detail=fallback)
+
+
 def _verify_registration(credential: Dict[str, Any], expected_challenge: str):
     verify_registration_response, _ = _require_webauthn()
 
@@ -90,7 +115,7 @@ def _verify_registration(credential: Dict[str, Any], expected_challenge: str):
 
     return verify_registration_response(
         credential=parsed_credential,
-        expected_challenge=expected_challenge,
+        expected_challenge=_normalize_challenge_bytes(expected_challenge),
         expected_origin=EXPECTED_ORIGIN,
         expected_rp_id=RP_ID,
         require_user_verification=True,
@@ -115,7 +140,7 @@ def _verify_authentication(
 
     return verify_authentication_response(
         credential=parsed_credential,
-        expected_challenge=expected_challenge,
+        expected_challenge=_normalize_challenge_bytes(expected_challenge),
         expected_origin=EXPECTED_ORIGIN,
         expected_rp_id=RP_ID,
         credential_public_key=_b64url_decode(stored_public_key),
@@ -188,7 +213,10 @@ def register_verify(
     db: Session = Depends(get_db),
 ):
     expected_challenge = _pop_challenge(current_user.id, "register")
-    verification = _verify_registration(req.credential, expected_challenge)
+    try:
+        verification = _verify_registration(req.credential, expected_challenge)
+    except Exception as exc:
+        _raise_as_client_error(exc, f"Passkey registration failed: {exc}")
 
     credential_id = _extract_credential_id(req.credential)
     if db.query(models.Passkey).filter(models.Passkey.credential_id == credential_id).first():
