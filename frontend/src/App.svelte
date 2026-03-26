@@ -24,6 +24,8 @@
   let qrCodeBase64 = "";
   let totpSecretText = "";
   let setupTotpCode = "";
+  let totpVerifyError = "";
+  let isTotpVerifying = false;
 
   // ── Chat State ─────────────────────────────────────────────────────────────
   $: activeChat = $chats.find(c => c.id === $selectedChatId);
@@ -326,10 +328,57 @@
       });
       if (res.ok) {
         const data = await res.json();
-        totpQR = data.qr_code;
-        // Optionally show a QR code modal here
+        qrCodeBase64 = data.qr_code;
+        totpSecretText = data.secret;
+        setupTotpCode = "";
+        totpVerifyError = "";
+        isSettingUpTOTP = true;
+      } else {
+        const err = await res.json();
+        totpVerifyError = err.detail || "Failed to generate TOTP";
       }
-    } catch (e) {}
+    } catch (e) {
+      totpVerifyError = "Network error: " + e.message;
+    }
+  }
+
+  async function verifyTOTPCode() {
+    if (!setupTotpCode || setupTotpCode.length !== 6) {
+      totpVerifyError = "Enter a valid 6-digit code";
+      return;
+    }
+    isTotpVerifying = true;
+    totpVerifyError = "";
+    try {
+      const res = await fetch(`${API_BASE}/auth/totp/verify?username=${currentUser}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({ totp_code: setupTotpCode })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        token = data.access_token;
+        isTotpEnabled = true;
+        localStorage.setItem("token", token);
+        localStorage.setItem("isTotpEnabled", "true");
+        isSettingUpTOTP = false;
+        qrCodeBase64 = "";
+        totpSecretText = "";
+        setupTotpCode = "";
+        successMessage = "2FA successfully enabled!";
+        setTimeout(() => { showSecuritySetupModal = false; }, 1500);
+      } else {
+        const err = await res.json();
+        totpVerifyError = err.detail || "Invalid 2FA code";
+      }
+    } catch (e) {
+      totpVerifyError = "Network error: " + e.message;
+    } finally {
+      isTotpVerifying = false;
+    }
   }
 
   async function createChat() {
@@ -717,15 +766,75 @@
               <h4 class="font-bold text-lg uppercase tracking-wider opacity-90">Authentication</h4>
             </div>
 
-            <div class="bg-base-200 rounded-2xl p-6 flex items-center justify-between border border-base-300">
-              <div>
-                <p class="font-bold text-base mb-1">Two-Factor Authentication (2FA)</p>
-                <p class="text-xs opacity-60">Adds an extra layer of security using a time-based code.</p>
+            {#if !isSettingUpTOTP}
+              <div class="bg-base-200 rounded-2xl p-6 flex items-center justify-between border border-base-300">
+                <div>
+                  <p class="font-bold text-base mb-1">Two-Factor Authentication (2FA)</p>
+                  <p class="text-xs opacity-60">Adds an extra layer of security using a time-based code.</p>
+                </div>
+                <button class="btn btn-secondary btn-sm px-6" on:click={generateTOTP} disabled={isTotpEnabled}>
+                  {isTotpEnabled ? 'Enabled' : 'Setup 2FA'}
+                </button>
               </div>
-              <button class="btn btn-secondary btn-sm px-6" on:click={generateTOTP} disabled={isTotpEnabled}>
-                {isTotpEnabled ? 'Enabled' : 'Setup 2FA'}
-              </button>
-            </div>
+            {:else}
+              <div class="bg-base-200 rounded-2xl p-6 border border-secondary/50 space-y-6">
+                <div>
+                  <p class="font-bold text-base mb-2">Scan QR Code</p>
+                  <p class="text-xs opacity-60 mb-4">Use an authenticator app like Google Authenticator, Authy, or Microsoft Authenticator.</p>
+                  <div class="bg-base-100 p-4 rounded-lg border border-base-300 flex items-center justify-center">
+                    {#if qrCodeBase64}
+                      <img src="data:image/png;base64,{qrCodeBase64}" alt="TOTP QR Code" class="w-48 h-48" />
+                    {:else}
+                      <div class="loading loading-spinner loading-lg"></div>
+                    {/if}
+                  </div>
+                </div>
+
+                <div class="bg-base-100 p-4 rounded-lg border border-base-300">
+                  <p class="text-[10px] font-bold uppercase opacity-50 mb-2">Backup Key (Manual Entry)</p>
+                  <div class="font-mono text-sm font-bold tracking-wider text-center p-3 bg-base-200 rounded border border-base-300 select-all">
+                    {totpSecretText}
+                  </div>
+                  <p class="text-xs opacity-60 mt-2">Save this code in a safe place. You can use it to recover access if you lose your authenticator.</p>
+                </div>
+
+                <div>
+                  <label class="label pb-2" for="totp-verify">
+                    <span class="label-text font-bold text-xs uppercase opacity-70">Enter 6-Digit Code</span>
+                  </label>
+                  <input
+                    id="totp-verify"
+                    type="text"
+                    placeholder="000000"
+                    maxlength="6"
+                    class="input input-bordered focus:input-secondary w-full tracking-[1em] font-mono text-center text-lg font-bold"
+                    bind:value={setupTotpCode}
+                    on:keydown={e => e.key === 'Enter' && !isTotpVerifying && verifyTOTPCode()}
+                    disabled={isTotpVerifying}
+                  />
+                  {#if totpVerifyError}
+                    <p class="text-error text-sm font-bold mt-2">{totpVerifyError}</p>
+                  {/if}
+                </div>
+
+                <div class="flex gap-3">
+                  <button
+                    class="btn btn-ghost flex-1"
+                    on:click={() => { isSettingUpTOTP = false; qrCodeBase64 = ""; totpSecretText = ""; setupTotpCode = ""; totpVerifyError = ""; }}
+                    disabled={isTotpVerifying}
+                  >
+                    Back
+                  </button>
+                  <button
+                    class="btn btn-secondary flex-1"
+                    on:click={verifyTOTPCode}
+                    disabled={setupTotpCode.length !== 6 || isTotpVerifying}
+                  >
+                    {isTotpVerifying ? 'Verifying...' : 'Verify & Enable'}
+                  </button>
+                </div>
+              </div>
+            {/if}
           </section>
 
           <!-- Step-Up PIN Section -->
@@ -771,7 +880,14 @@
         </div>
 
         <div class="p-6 bg-base-200 border-t border-base-300 flex justify-end">
-          <button class="btn btn-ghost px-8" on:click={() => (showSecuritySetupModal = false, totpQR = '')}>Done</button>
+          <button class="btn btn-ghost px-8" on:click={() => {
+            showSecuritySetupModal = false;
+            isSettingUpTOTP = false;
+            qrCodeBase64 = "";
+            totpSecretText = "";
+            setupTotpCode = "";
+            totpVerifyError = "";
+          }}>Done</button>
         </div>
       </div>
     </div>
