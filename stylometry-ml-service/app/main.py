@@ -119,8 +119,8 @@ def train_user_model(username: str):
         print(f"[WARN] /train/{username}: {legacy_count}/{len(raw_lines)} lines could not be decrypted — "
               f"treated as legacy plain-text. Consider re-collecting baseline data.")
 
-    if len(user_texts) < 20:
-        raise HTTPException(status_code=400, detail="Require at least 20 baseline messages.")
+    if len(user_texts) < 50:
+        raise HTTPException(status_code=400, detail="Require at least 50 baseline messages.")
 
         
     user_dir = os.path.join(ML_WORKSPACE, username)

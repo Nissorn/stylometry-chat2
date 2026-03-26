@@ -192,8 +192,8 @@ async def websocket_endpoint(
                                 with open(baseline_path, "r", encoding="utf-8") as f:
                                     line_count = sum(1 for ln in f if ln.strip())
 
-                                if line_count == 20 or (
-                                    line_count > 20 and line_count % 10 == 0
+                                if line_count == 50 or (
+                                    line_count > 50 and line_count % 10 == 0
                                 ):
                                     asyncio.create_task(
                                         client.post(
@@ -266,21 +266,12 @@ async def websocket_endpoint(
                                     )
                                 else:
                                     # ── ACTIVE — 3-Zone Trust Logic ──────────
-                                    baseline_path = os.path.join(
-                                        "/ml_workspace/data", f"{username}_baseline.txt"
-                                    )
-                                    try:
-                                        with open(baseline_path, "r", encoding="utf-8") as f:
-                                            baseline_count = sum(1 for ln in f if ln.strip())
-                                    except FileNotFoundError:
-                                        baseline_count = 0
-
                                     score = latest_score
-                                    if score < 0.50:
-                                        penalty = 10.0 if baseline_count < 100 else 25.0
+                                    if score < 0.55:
+                                        penalty = 25.0
                                         trust_score = max(0.0, trust_score - penalty)
                                     elif score <= 0.85:
-                                        pass # Gray zone
+                                        pass  # Neutral zone
                                     else:
                                         trust_score = min(100.0, trust_score + 5.0)
 
