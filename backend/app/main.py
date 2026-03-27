@@ -19,6 +19,7 @@ from .auth import router as auth_router
 from .chat import router as chat_router
 from .crypto import decrypt, encrypt
 from .database import engine, get_db
+from .routers.auth_webauthn import router as webauthn_router
 from .ws_manager import manager
 
 # ---------------------------------------------------------------------------
@@ -31,7 +32,6 @@ def _run_migrations() -> None:
     """Add new columns to the users table when they don't exist yet."""
     new_columns = [
         ("security_enabled", "BOOLEAN NOT NULL DEFAULT 0"),
-        ("unlock_pin_hash", "VARCHAR"),
         ("is_frozen", "BOOLEAN NOT NULL DEFAULT 0"),
     ]
     with engine.connect() as conn:
@@ -42,6 +42,14 @@ def _run_migrations() -> None:
             if col_name not in existing_cols:
                 conn.execute(text(f"ALTER TABLE users ADD COLUMN {col_name} {col_def}"))
                 print(f"[MIGRATION] Added column users.{col_name}")
+
+        # Best-effort cleanup for legacy PIN column.
+        if "unlock_pin_hash" in existing_cols:
+            try:
+                conn.execute(text("ALTER TABLE users DROP COLUMN unlock_pin_hash"))
+                print("[MIGRATION] Removed legacy users.unlock_pin_hash")
+            except Exception:
+                pass
         conn.commit()
 
 
@@ -55,7 +63,7 @@ app = FastAPI(title="Thai-Stylometry Ultimate App")
 _raw_origins: str = (
     os.getenv("ALLOW_ORIGINS")
     or os.getenv("ALLOWED_ORIGINS")
-    or "*"
+    or "https://stylometry.nissorn.codes,http://localhost:5173,https://localhost:5173"
 ).strip()
 
 if _raw_origins == "*":
@@ -74,6 +82,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router, prefix="/auth")
+app.include_router(webauthn_router, prefix="/auth/webauthn")
 app.include_router(chat_router, prefix="/chats")
 
 

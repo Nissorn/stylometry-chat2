@@ -11,3 +11,5 @@ Pillow
 websockets
 httpx
 cryptography
+py_webauthn
+webauthn
