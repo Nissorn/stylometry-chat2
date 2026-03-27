@@ -1,6 +1,6 @@
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from . import auth, models, schemas
@@ -87,6 +87,8 @@ def get_my_chats(
 @router.get("/{chat_id}/messages", response_model=List[schemas.MessageResponse])
 def get_chat_messages(
     chat_id: int,
+    limit: int = Query(default=50, ge=1, le=200),
+    skip: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(auth.get_current_user),
 ):
@@ -102,13 +104,16 @@ def get_chat_messages(
     if not member:
         raise HTTPException(status_code=403, detail="Not a member of this chat")
 
-    # Always return messages in chronological order (oldest first)
-    messages = (
+    # Fetch newest first for performance, then reverse for UI chronology.
+    recent_messages = (
         db.query(models.Message)
         .filter(models.Message.chat_id == chat_id)
-        .order_by(models.Message.timestamp.asc())
+        .order_by(models.Message.created_at.desc())
+        .offset(skip)
+        .limit(limit)
         .all()
     )
+    messages = list(reversed(recent_messages))
 
     return [
         {

@@ -41,6 +41,7 @@
   let showDebug = false;
   let currentWsId = null;
   let historyRequestToken = 0;
+  let lastAutoScrolledCount = 0;
 
   // ── Modal Visibility ───────────────────────────────────────────────────────
   let showRegisterModal = false;
@@ -112,6 +113,11 @@
     }
   }
 
+  $: if (messages.length !== lastAutoScrolledCount) {
+    lastAutoScrolledCount = messages.length;
+    scrollToBottom();
+  }
+
   async function checkFrozenStatus() {
     try {
       const res = await fetch(`${API_BASE}/auth/me`, {
@@ -135,7 +141,8 @@
     const requestToken = ++historyRequestToken;
     isLoadingHistory = true;
     try {
-      const res = await fetch(`${API_BASE}/chats/${chatId}/messages`, {
+      const params = new URLSearchParams({ limit: "50", skip: "0" });
+      const res = await fetch(`${API_BASE}/chats/${chatId}/messages?${params.toString()}`, {
         headers: { "Authorization": `Bearer ${token}` }
       });
       if (res.ok) {
@@ -152,7 +159,6 @@
         }));
 
         messages = loadedMessages;
-        scrollToBottom();
       }
     } catch (e) {
       console.error("[History] Error:", e);
@@ -209,7 +215,6 @@
             timestamp: data.timestamp || new Date().toISOString()
           }
         ];
-        scrollToBottom();
       }
     };
 
@@ -407,7 +412,12 @@
 
   async function scrollToBottom() {
     await tick();
-    if (chatContainer) chatContainer.scrollTop = chatContainer.scrollHeight;
+    if (chatContainer) {
+      chatContainer.scrollTo({
+        top: chatContainer.scrollHeight,
+        behavior: "smooth"
+      });
+    }
   }
 
   // ── Group Actions ──────────────────────────────────────────────────────────
